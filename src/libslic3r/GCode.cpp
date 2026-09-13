@@ -2608,6 +2608,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         mesh_bbox.max            = mesh_bbox.max.cwiseMin((bbox.max.array() + mesh_margin).matrix());
         this->placeholder_parser().set("adaptive_bed_mesh_min", new ConfigOptionFloats({mesh_bbox.min.x(), mesh_bbox.min.y()}));
         this->placeholder_parser().set("adaptive_bed_mesh_max", new ConfigOptionFloats({mesh_bbox.max.x(), mesh_bbox.max.y()}));
+        this->placeholder_parser().set("bed_mesh_code", m_config.adaptive_bed_mesh.value ? "G30" : "G31");
 
         auto probe_dist_x  = std::max(1., m_config.bed_mesh_probe_distance.value.x());
         auto probe_dist_y  = std::max(1., m_config.bed_mesh_probe_distance.value.y());

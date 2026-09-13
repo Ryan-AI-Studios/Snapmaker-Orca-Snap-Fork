@@ -49,3 +49,5 @@ sentry-native/
 .claude/
 .hermes/
 CLAUDE.md
+# Agent skills / local AI tooling (must never ship)
+.agents/

@@ -4644,6 +4644,7 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("extruder_clearance_height_to_lid");
 
         optgroup = page->new_optgroup(L("Adaptive bed mesh"), "param_adaptive_mesh");
+        optgroup->append_single_option_line("adaptive_bed_mesh", "adaptive-bed-mesh");
         optgroup->append_single_option_line("bed_mesh_min", "adaptive-bed-mesh");
         optgroup->append_single_option_line("bed_mesh_max", "adaptive-bed-mesh");
         optgroup->append_single_option_line("bed_mesh_probe_distance", "adaptive-bed-mesh");
@@ -5383,7 +5384,7 @@ void TabPrinter::toggle_options()
             toggle_line(el, is_BBL_printer);
 
         // SoftFever: hide non-BBL settings
-        for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "thumbnails"})
+        for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "adaptive_bed_mesh", "thumbnails"})
           toggle_line(el, !is_BBL_printer);
     }
 
