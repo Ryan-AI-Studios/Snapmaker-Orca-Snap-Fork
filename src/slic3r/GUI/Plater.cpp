@@ -11,6 +11,7 @@
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentConvert.hpp"
 #include "libslic3r/PicPrint.hpp"
+#include "libslic3r/OfdCatalog.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
@@ -159,6 +160,7 @@
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
+#include "OfdCatalogDialog.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
@@ -9021,6 +9023,69 @@ void Plater::picprint_on_selected()
     BOOST_LOG_TRIVIAL(info) << "PicPrint: clusters=" << plan.cluster_count
                             << " mixes=" << entries.size()
                             << " skipped_faces=" << skipped_faces;
+}
+
+void Plater::ofd_open_catalog()
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return;
+
+    ConfigOptionStrings *fc = bundle->project_config.option<ConfigOptionStrings>("filament_colour", true);
+    if (fc == nullptr || fc->values.empty()) {
+        MessageDialog(this,
+            _L("Need at least one physical filament slot."),
+            _L("OFD catalog"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    OfdCatalogDialog dlg(this, fc->values.size());
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    if (!dlg.has_selection()) {
+        MessageDialog(this,
+            _L("Select a filament from the catalog."),
+            _L("OFD catalog"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    const OfdVariant variant = dlg.selected_variant();
+    const size_t     slot    = dlg.selected_slot();
+    if (variant.color_hexes.empty() || slot >= fc->values.size()) {
+        MessageDialog(this,
+            _L("Cannot stamp that slot."),
+            _L("OFD catalog"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    std::vector<std::string> colour = fc->values;
+    ConfigOptionStrings *mc = bundle->project_config.option<ConfigOptionStrings>("filament_multi_colors", true);
+    ConfigOptionInts    *md = bundle->project_config.option<ConfigOptionInts>("filament_colour_mode", true);
+    std::vector<std::string> multi = (mc != nullptr) ? mc->values : std::vector<std::string>(colour.size());
+    std::vector<int>         mode  = (md != nullptr) ? md->values : std::vector<int>(colour.size(), 0);
+
+    if (!ofd_stamp_slot(colour, multi, mode, slot, variant.color_hexes)) {
+        MessageDialog(this,
+            _L("Cannot stamp that slot."),
+            _L("OFD catalog"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    take_snapshot("OFD catalog");
+    fc->values = std::move(colour);
+    if (mc != nullptr)
+        mc->values = std::move(multi);
+    if (md != nullptr)
+        md->values = std::move(mode);
+
+    std::vector<OfdVariant> recents = ofd_load_recents_file(ofd_default_recents_path());
+    ofd_recents_push(recents, variant);
+    ofd_save_recents_file(ofd_default_recents_path(), recents);
+
+    update_project_dirty_from_presets();
+    sidebar().update_all_preset_comboboxes();
+    update();
 }
 
 void Sidebar::cleanup_unused_filaments_after_batch_match(const BatchMatchResult &match_result,

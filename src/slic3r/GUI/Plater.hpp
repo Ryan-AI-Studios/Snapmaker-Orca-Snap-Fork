@@ -1011,6 +1011,7 @@ public:
         Model                      *model_override = nullptr);
 
     void picprint_on_selected();
+    void ofd_open_catalog();
 
 private:
     struct priv;

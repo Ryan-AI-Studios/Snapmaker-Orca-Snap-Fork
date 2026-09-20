@@ -295,6 +295,8 @@ set(lisbslic3r_sources
     MixedFilamentConvert.hpp
     MixedFilamentSwatch.cpp
     MixedFilamentSwatch.hpp
+    OfdCatalog.cpp
+    OfdCatalog.hpp
     PicPrint.cpp
     PicPrint.hpp
     PaintReproject.cpp

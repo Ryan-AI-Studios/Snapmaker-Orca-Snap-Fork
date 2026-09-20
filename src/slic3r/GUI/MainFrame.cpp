@@ -2839,6 +2839,10 @@ void MainFrame::init_menubar_as_editor()
             _L("Paint the selected object from a picture using mixed-filament recipes"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->picprint_on_selected(); },
             "", nullptr, [this]() { return m_plater && m_plater->get_selected_object_idx() >= 0; }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("OFD catalog") + dots,
+            _L("Stamp an Open Filament Database colour onto an existing physical slot"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->ofd_open_catalog(); },
+            "", nullptr, [this]() { return m_plater != nullptr; }, this);
         editMenu->AppendSeparator();
 
         // BBS Select All
