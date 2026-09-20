@@ -338,6 +338,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/OAuthDialog.hpp
     GUI/OfdCatalogDialog.cpp
     GUI/OfdCatalogDialog.hpp
+    GUI/SlotRemapDialog.cpp
+    GUI/SlotRemapDialog.hpp
     GUI/MixedFilamentDialog.cpp
     GUI/MixedFilamentDialog.hpp
     GUI/MixedFilamentBatchDialog.cpp
