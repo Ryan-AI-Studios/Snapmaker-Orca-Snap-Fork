@@ -168,6 +168,9 @@ public:
     // many-second) deletion loop. Default-empty: existing callers see no change.
     void cleanup_unused_filaments_after_batch_match(const BatchMatchResult& match_result,
                                                     std::function<void(int /*current*/, int /*total*/)> on_progress = nullptr);
+    // Palette rewrite + mix create + paint remap + cleanup. Shared by the Color
+    // Mixing Match button and the on-open / printer-switch convert hook.
+    void apply_batch_match_result(const BatchMatchResult& result, Model* model = nullptr);
     void add_custom_filament(wxColour new_col);
     void edit_filament();
 
@@ -993,6 +996,20 @@ public:
 
     bool is_loading_project() const { return m_loading_project; }
 
+    enum class ConvertPaintedResult { Skipped, Disabled, Ineligible, Kept, Converted };
+
+    // Consent-first convert of >4 painted colours to mixes. model_override is
+    // the incoming 3MF model for T2 (geometry-only) before it is merged.
+    ConvertPaintedResult maybe_prompt_convert_painted_colours(
+        bool         restore_or_silence,
+        bool         adopt_zr_ultra_s,
+        Model       *model_override = nullptr);
+
+    bool convert_painted_colours_to_mixes(
+        const PaintedSourcePalette &captured,
+        bool                        adopt_zr_ultra_s,
+        Model                      *model_override = nullptr);
+
 private:
     struct priv;
     std::unique_ptr<priv> p;
@@ -1009,6 +1026,7 @@ private:
     bool m_exported_file { false };
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
+    bool m_convert_painted_in_progress { false };
     std::string m_preview_only_filename;
     int m_valid_plates_count { 0 };
 
