@@ -997,6 +997,7 @@ public:
     bool is_loading_project() const { return m_loading_project; }
 
     enum class ConvertPaintedResult { Skipped, Disabled, Ineligible, Kept, Converted };
+    enum class RemapFourColorResult { Skipped, Disabled, Ineligible, Cancelled, Applied };
 
     // Consent-first convert of >4 painted colours to mixes. model_override is
     // the incoming 3MF model for T2 (geometry-only) before it is merged.
@@ -1009,6 +1010,18 @@ public:
         const PaintedSourcePalette &captured,
         bool                        adopt_zr_ultra_s,
         Model                      *model_override = nullptr);
+
+    // Consent-first ≤4-colour physical remap. Run after convert returns
+    // Ineligible or Disabled. model_override is T2 incoming geometry.
+    RemapFourColorResult maybe_prompt_remap_four_color_project(
+        bool         restore_or_silence,
+        bool         adopt_zr_ultra_s,
+        Model       *model_override = nullptr);
+
+    void maybe_prompt_convert_then_remap(
+        bool         restore_or_silence,
+        bool         adopt_zr_ultra_s,
+        Model       *model_override = nullptr);
 
     void picprint_on_selected();
     void ofd_open_catalog();
@@ -1030,6 +1043,7 @@ private:
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
     bool m_convert_painted_in_progress { false };
+    bool m_remap_four_color_in_progress { false };
     std::string m_preview_only_filename;
     int m_valid_plates_count { 0 };
 

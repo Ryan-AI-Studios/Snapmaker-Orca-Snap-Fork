@@ -12,6 +12,7 @@
 #include "libslic3r/MixedFilamentConvert.hpp"
 #include "libslic3r/PicPrint.hpp"
 #include "libslic3r/OfdCatalog.hpp"
+#include "libslic3r/SlotRemap.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
@@ -161,6 +162,7 @@
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
 #include "OfdCatalogDialog.hpp"
+#include "SlotRemapDialog.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
@@ -8721,7 +8723,7 @@ const std::vector<std::string> k_full_spectrum_fallback_colors = {
 Plater::ConvertPaintedResult Plater::maybe_prompt_convert_painted_colours(
     bool restore_or_silence, bool adopt_zr_ultra_s, Model *model_override)
 {
-    if (m_convert_painted_in_progress)
+    if (m_convert_painted_in_progress || m_remap_four_color_in_progress)
         return ConvertPaintedResult::Skipped;
 
     AppConfig *cfg = wxGetApp().app_config;
@@ -8840,6 +8842,165 @@ bool Plater::convert_painted_colours_to_mixes(
             tab->select_preset(name);
     }
     return true;
+}
+
+void Plater::maybe_prompt_convert_then_remap(
+    bool restore_or_silence, bool adopt_zr_ultra_s, Model *model_override)
+{
+    const ConvertPaintedResult conv =
+        maybe_prompt_convert_painted_colours(restore_or_silence, adopt_zr_ultra_s, model_override);
+    if (conv == ConvertPaintedResult::Ineligible || conv == ConvertPaintedResult::Disabled)
+        maybe_prompt_remap_four_color_project(restore_or_silence, adopt_zr_ultra_s, model_override);
+}
+
+Plater::RemapFourColorResult Plater::maybe_prompt_remap_four_color_project(
+    bool restore_or_silence, bool adopt_zr_ultra_s, Model *model_override)
+{
+    if (m_convert_painted_in_progress || m_remap_four_color_in_progress)
+        return RemapFourColorResult::Skipped;
+
+    AppConfig *app_cfg = wxGetApp().app_config;
+    if (app_cfg != nullptr) {
+        const std::string val = app_cfg->get("prompt_remap_four_color_projects");
+        if (!val.empty() && val != "1" && val != "true")
+            return RemapFourColorResult::Disabled;
+    }
+
+    PresetBundle *pb = wxGetApp().preset_bundle;
+    if (pb == nullptr)
+        return RemapFourColorResult::Skipped;
+
+    Model &target = model_override != nullptr ? *model_override : this->model();
+
+    std::vector<std::string> colours;
+    if (auto *fc = pb->project_config.option<ConfigOptionStrings>("filament_colour"))
+        colours = fc->values;
+
+    const PaintedSourcePalette captured = capture_painted_source_palette(
+        target, colours, &pb->mixed_filaments);
+
+    const std::string printer_name  = pb->printers.get_edited_preset().name;
+    std::string       printer_model;
+    if (const auto *pm = pb->printers.get_edited_preset().config.option<ConfigOptionString>("printer_model"))
+        printer_model = pm->value;
+
+    const bool zr_active =
+        printer_model == "WonderMaker ZR Ultra S" ||
+        printer_name.find("WonderMaker ZR Ultra S") != std::string::npos;
+    const bool zr_ultra_s = adopt_zr_ultra_s || zr_active;
+
+    size_t physical = 0;
+    if (zr_active) {
+        if (const auto *nd = pb->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter"))
+            physical = nd->values.size();
+        if (physical == 0)
+            physical = pb->filament_presets.size();
+    }
+    if (adopt_zr_ultra_s)
+        physical = 4;
+
+    std::vector<std::string> dest_colours;
+    if (zr_active && colours.size() >= 4)
+        dest_colours.assign(colours.begin(), colours.begin() + 4);
+
+    const std::vector<unsigned int> used =
+        slot_remap_collect_used_ids(target, &pb->project_config);
+
+    SlotRemapPromptInput input;
+    input.silence              = restore_or_silence;
+    input.unique_color_count   = captured.unique_color_count() > 0
+        ? captured.unique_color_count()
+        : colours.size();
+    input.enabled_mix_count    = captured.enabled_mix_count;
+    input.has_assignments      = captured.paint_nonempty || !used.empty();
+    input.zr_ultra_s           = zr_ultra_s;
+    input.physical_count       = physical;
+    input.source_printer_model = printer_model;
+    input.source_colours       = colours;
+    input.dest_colours         = dest_colours;
+    input.used_ids             = used;
+
+    if (!should_prompt_remap_four_color_project(input))
+        return RemapFourColorResult::Ineligible;
+
+    if (physical != 4) {
+        MessageDialog(this,
+            _L("Need a WonderMaker ZR Ultra S 4-tool loadout before remapping source slots."),
+            _L("Remap toolheads"), wxOK | wxICON_WARNING)
+            .ShowModal();
+        return RemapFourColorResult::Ineligible;
+    }
+
+    std::vector<unsigned int> sources = used;
+    if (sources.empty()) {
+        for (size_t i = 1; i <= std::min<size_t>(colours.size(), 4); ++i)
+            sources.push_back(static_cast<unsigned int>(i));
+    }
+    if (sources.empty())
+        return RemapFourColorResult::Ineligible;
+
+    const SlotRemapMap suggested = slot_remap_suggest(colours, dest_colours, sources);
+    SlotRemapDialog dlg(this, sources, colours, dest_colours, suggested);
+    if (dlg.ShowModal() != wxID_OK)
+        return RemapFourColorResult::Cancelled;
+
+    const SlotRemapMap map = dlg.result_map();
+    if (slot_remap_is_identity_for_used(map, sources))
+        return RemapFourColorResult::Ineligible;
+    for (unsigned int src : sources) {
+        const unsigned int dest = slot_remap_lookup(map, src);
+        if (dest < 1 || dest > 4) {
+            MessageDialog(this,
+                _L("Could not apply that toolhead map. Every used source slot must map onto toolheads 1–4."),
+                _L("Remap toolheads"), wxOK | wxICON_WARNING)
+                .ShowModal();
+            return RemapFourColorResult::Skipped;
+        }
+    }
+
+    m_remap_four_color_in_progress = true;
+    struct FlagGuard {
+        bool &flag;
+        ~FlagGuard() { flag = false; }
+    } guard{m_remap_four_color_in_progress};
+
+    take_snapshot("Remap toolheads");
+    if (!slot_remap_apply(target, &pb->project_config, map, 4)) {
+        MessageDialog(this,
+            _L("Could not apply that toolhead map. Every used source slot must map onto toolheads 1–4."),
+            _L("Remap toolheads"), wxOK | wxICON_WARNING)
+            .ShowModal();
+        return RemapFourColorResult::Skipped;
+    }
+
+    if (p != nullptr) {
+        PartPlateList &plates = get_partplate_list();
+        for (int i = 0; i < plates.get_plate_count(); ++i) {
+            PartPlate *plate = plates.get_plate(i);
+            if (plate == nullptr)
+                continue;
+            std::vector<int> seq = plate->get_first_layer_print_sequence();
+            slot_remap_int_sequence(seq, map);
+            plate->set_first_layer_print_sequence(seq);
+        }
+    }
+
+    if (adopt_zr_ultra_s) {
+        double nozzle = 0.4;
+        if (const auto *opt = pb->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+            opt != nullptr && !opt->values.empty())
+            nozzle = opt->values.front();
+        std::string name = zr_ultra_s_preset_name_for_nozzle(nozzle);
+        if (pb->printers.find_preset(name) == nullptr)
+            name = "WonderMaker ZR Ultra S 0.4 nozzle";
+        if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER))
+            tab->select_preset(name);
+    }
+
+    update_project_dirty_from_presets();
+    sidebar().update_all_preset_comboboxes();
+    update();
+    return RemapFourColorResult::Applied;
 }
 
 void Plater::picprint_on_selected()
@@ -12139,7 +12300,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     "mixed_filament_surface_indentation"
                                 };
                                 preset_bundle->project_config.apply_only(config_loaded, imported_project_option_keys, true);
-                                q->maybe_prompt_convert_painted_colours(silence, false, &model);
+                                q->maybe_prompt_convert_then_remap(silence, false, &model);
                                 if (current_num_filaments != desired_physical_filaments) {
                                     q->confirm_auto_generated_gradients(desired_physical_filaments);
                                     preset_bundle->set_num_filaments(unsigned(desired_physical_filaments));
@@ -12839,7 +13000,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 Plater *plater = q;
                 wxGetApp().CallAfter([plater]() {
                     if (plater != nullptr && wxGetApp().plater() == plater)
-                        plater->maybe_prompt_convert_painted_colours(false, true, nullptr);
+                        plater->maybe_prompt_convert_then_remap(false, true, nullptr);
                 });
             }
             if (shouldInitializeAssemblyPosition)

@@ -15,6 +15,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament_swatch.cpp
 	test_picprint.cpp
 	test_ofd.cpp
+	test_slot_remap.cpp
 	test_paint_reproject.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp

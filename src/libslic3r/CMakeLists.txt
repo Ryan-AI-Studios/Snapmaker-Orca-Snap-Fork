@@ -299,6 +299,8 @@ set(lisbslic3r_sources
     OfdCatalog.hpp
     PicPrint.cpp
     PicPrint.hpp
+    SlotRemap.cpp
+    SlotRemap.hpp
     PaintReproject.cpp
     PaintReproject.hpp
     ColorSpace.cpp
