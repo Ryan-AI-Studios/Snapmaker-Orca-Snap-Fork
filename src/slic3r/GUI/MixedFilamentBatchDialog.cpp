@@ -28,6 +28,10 @@
 #include <wx/scrolwin.h>
 #include <wx/dcbuffer.h>
 #include <wx/wupdlock.h>
+#include <wx/filedlg.h>
+#include <fstream>
+#include <sstream>
+#include "libslic3r/MixedFilamentSwatch.hpp"
 #include <boost/log/trivial.hpp>
 
 namespace Slic3r { namespace GUI {
@@ -1680,6 +1684,27 @@ void MixedFilamentBatchDialog::build_mapping_card(wxBoxSizer& parent)
         lbl->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
         lbl->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#FFFFFF")));
         tr->Add(lbl, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+        tr->AddStretchSpacer(1);
+        auto* btn_import = new Button(m_mapping_card, _L("Import LUT"));
+        btn_import->SetMinSize(wxSize(FromDIP(88), FromDIP(24)));
+        btn_import->SetCornerRadius(FromDIP(4));
+        btn_import->SetBorderWidth(FromDIP(1));
+        btn_import->SetFont(Label::Body_12);
+        btn_import->SetBorderColorNormal(wxColour("#DBDBDB"));
+        btn_import->SetBackgroundColorNormal(wxColour("#F8F7F7"));
+        btn_import->SetTextColorNormal(wxColour("#242424"));
+        btn_import->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { import_swatch_lut(); });
+        auto* btn_export = new Button(m_mapping_card, _L("Export LUT"));
+        btn_export->SetMinSize(wxSize(FromDIP(88), FromDIP(24)));
+        btn_export->SetCornerRadius(FromDIP(4));
+        btn_export->SetBorderWidth(FromDIP(1));
+        btn_export->SetFont(Label::Body_12);
+        btn_export->SetBorderColorNormal(wxColour("#DBDBDB"));
+        btn_export->SetBackgroundColorNormal(wxColour("#F8F7F7"));
+        btn_export->SetTextColorNormal(wxColour("#242424"));
+        btn_export->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { export_swatch_lut(); });
+        tr->Add(btn_import, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        tr->Add(btn_export, 0, wxALIGN_CENTER_VERTICAL);
         cs->Add(tr, 0, wxTOP | wxLEFT | wxRIGHT, FromDIP(16));
     }
     // 10px gap between the title row and the legend grid (no divider — see commit history).
@@ -2752,6 +2777,75 @@ void MixedFilamentBatchDialog::handle_batch_match_result(const BatchMatchResult&
     Layout();
 }
 
+void MixedFilamentBatchDialog::import_swatch_lut()
+{
+    wxFileDialog dlg(this, _L("Import swatch LUT"), wxEmptyString, wxEmptyString,
+                     "JSON and CSV|*.json;*.csv|JSON (*.json)|*.json|CSV (*.csv)|*.csv",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const std::string path = dlg.GetPath().ToUTF8().data();
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        MessageDialog err(this, _L("Could not open the selected file."), _L("Import LUT"), wxOK | wxICON_ERROR);
+        err.ShowModal();
+        return;
+    }
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    Slic3r::SwatchLut         lut;
+    Slic3r::SwatchParseReport report;
+    auto ends_with_json = [](const std::string &p) {
+        return p.size() >= 5 && (p.compare(p.size() - 5, 5, ".json") == 0 || p.compare(p.size() - 5, 5, ".JSON") == 0);
+    };
+    const bool        is_json = ends_with_json(path) || (!ss.str().empty() && ss.str().front() == '{');
+    const bool        parsed  = is_json ? parse_swatch_lut_json(ss.str(), lut, report)
+                                        : parse_swatch_lut_csv(ss.str(), lut, report);
+    if (!parsed || !report.ok) {
+        MessageDialog err(this,
+            wxString::Format(_L("Import rejected: %s"), report.error.empty() ? "invalid file" : report.error),
+            _L("Import LUT"), wxOK | wxICON_ERROR);
+        err.ShowModal();
+        return;
+    }
+    std::string save_err;
+    if (!save_swatch_lut(default_swatch_lut_path(), lut, &save_err)) {
+        MessageDialog err(this,
+            wxString::Format(_L("Parsed but could not save LUT: %s"), save_err),
+            _L("Import LUT"), wxOK | wxICON_ERROR);
+        err.ShowModal();
+        return;
+    }
+    MessageDialog ok(this,
+        wxString::Format(_L("Imported %d entries (skipped non-finite %d, duplicate %d, unknown %d). Enable \"Use measured swatch calibration\" to apply them."),
+                         int(report.accepted), int(report.skipped_nonfinite), int(report.skipped_duplicate),
+                         int(report.skipped_unknown_key)),
+        _L("Import LUT"), wxOK | wxICON_INFORMATION);
+    ok.ShowModal();
+}
+
+void MixedFilamentBatchDialog::export_swatch_lut()
+{
+    Slic3r::SwatchLut         lut;
+    Slic3r::SwatchParseReport report;
+    if (!load_swatch_lut_file(default_swatch_lut_path(), lut, report) || !report.ok) {
+        MessageDialog err(this, _L("No saved swatch LUT to export. Import one first."),
+                          _L("Export LUT"), wxOK | wxICON_INFORMATION);
+        err.ShowModal();
+        return;
+    }
+    wxFileDialog dlg(this, _L("Export swatch LUT"), wxEmptyString, "swatch_lut.json",
+                     "JSON (*.json)|*.json", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    std::string save_err;
+    if (!save_swatch_lut(dlg.GetPath().ToUTF8().data(), lut, &save_err)) {
+        MessageDialog err(this, wxString::Format(_L("Export failed: %s"), save_err),
+                          _L("Export LUT"), wxOK | wxICON_ERROR);
+        err.ShowModal();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Legend (matches prototype: src-swatch → badge-number  ΔE-badge)
 // ---------------------------------------------------------------------------
@@ -2916,7 +3010,9 @@ void MixedFilamentBatchDialog::update_mapping_legend()
                 // Per copy spec, tooltip format: "Color Difference: {Level} (ΔE={X})".
                 // The ΔE glyph needs a font with Greek coverage; wx's default UI font on all
                 // supported platforms (Win10+, macOS, mainstream Linux) has it.
-                const wxString tip = wxString::Format(_L("Color Difference: %s (\u0394E=%.1f)"), grade, row_delta_e);
+                const wxString provenance = mapping.recipe.used_measured_lab ? _L("Calibrated") : _L("Predicted");
+                const wxString tip = wxString::Format(_L("Color Difference: %s (\u0394E=%.1f) [%s]"),
+                                                      grade, row_delta_e, provenance);
                 item->SetToolTip(tip);
                 src_bmp_ctrl->SetToolTip(tip);
                 arrow->SetToolTip(tip);

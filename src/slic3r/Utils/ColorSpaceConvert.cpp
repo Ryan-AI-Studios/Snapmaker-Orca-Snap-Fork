@@ -1,4 +1,5 @@
 #include "ColorSpaceConvert.hpp"
+#include "libslic3r/ColorSpace.hpp"
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
@@ -104,9 +105,10 @@ void XYZ2Lab(float X, float Y, float Z, float* L, float* a, float* b)
 
 void RGB2Lab(float R, float G, float B, float* L, float* a, float* b)
 {
-    float X = 0.0f, Y = 0.0f, Z = 0.0f;
-    RGB2XYZ(R, G, B, &X, &Y, &Z);
-    XYZ2Lab(X, Y, Z, L, a, b);
+    const Slic3r::CIELab lab = Slic3r::rgb_to_lab(R, G, B);
+    *L = float(lab.L);
+    *a = float(lab.a);
+    *b = float(lab.b);
 }
 
 // The input r, g, b values should be in range [0, 1]. The output h is in range [0, 360], s is in range [0, 1] and v is in range [0, 1].
@@ -141,71 +143,7 @@ void RGB2HSV(float r, float g, float b, float* h, float* s, float* v)
 
 float DeltaE00(float l1, float a1, float b1, float l2, float a2, float b2)
 {
-    auto rad2deg = [](float rad) {
-        return 360.0 * rad / (2.0 * M_PI);
-    };
-
-    auto deg2rad = [](float deg) {
-        return (2.0 * M_PI * deg) / 360.0;
-    };
-
-    float avgL = (l1 + l2) / 2.0;
-    float c1 = std::sqrt(std::pow(a1, 2) + std::pow(b1, 2));
-    float c2 = std::sqrt(std::pow(a2, 2) + std::pow(b2, 2));
-    float avgC = (c1 + c2) / 2.0;
-    float g = (1.0 - std::sqrt(std::pow(avgC, 7) / (std::pow(avgC, 7) + std::pow(25.0, 7)))) / 2.0;
-
-    float a1p = a1 * (1.0 + g);
-    float a2p = a2 * (1.0 + g);
-
-    float c1p = std::sqrt(std::pow(a1p, 2) + std::pow(b1, 2));
-    float c2p = std::sqrt(std::pow(a2p, 2) + std::pow(b2, 2));
-
-    float avgCp = (c1p + c2p) / 2.0;
-
-    float h1p = rad2deg(std::atan2(b1, a1p));
-    if (h1p < 0.0) {
-        h1p = h1p + 360.0;
-    }
-
-    float h2p = rad2deg(std::atan2(b2, a2p));
-    if (h2p < 0.0) {
-        h2p = h2p + 360;
-    }
-
-    float avghp = std::abs(h1p - h2p) > 180.0 ? (h1p + h2p + 360.0) / 2.0 : (h1p + h2p) / 2.0;
-
-    float t = 1.0 - 0.17 * std::cos(deg2rad(avghp - 30.0)) + 0.24 * std::cos(deg2rad(2.0 * avghp)) + 0.32 * std::cos(deg2rad(3.0 * avghp + 6.0)) - 0.2 * std::cos(deg2rad(4.0 * avghp - 63.0));
-
-    float deltahp = h2p - h1p;
-    if (std::abs(deltahp) > 180.0) {
-        if (h2p <= h1p) {
-            deltahp += 360.0;
-        }
-        else {
-            deltahp -= 360.0;
-        }
-    }
-
-    float deltalp = l2 - l1;
-    float deltacp = c2p - c1p;
-
-    deltahp = 2.0 * std::sqrt(c1p * c2p) * std::sin(deg2rad(deltahp) / 2.0);
-
-    float sl = 1.0 + ((0.015 * std::pow(avgL - 50.0, 2)) / std::sqrt(20.0 + std::pow(avgL - 50.0, 2)));
-    float sc = 1.0 + 0.045 * avgCp;
-    float sh = 1.0 + 0.015 * avgCp * t;
-
-    float deltaro = 30.0 * std::exp(-(std::pow((avghp - 275.0) / 25.0, 2)));
-    float rc = 2.0 * std::sqrt(std::pow(avgCp, 7) / (std::pow(avgCp, 7) + std::pow(25.0, 7)));
-    float rt = -rc * std::sin(2.0 * deg2rad(deltaro));
-
-    float kl = 1;
-    float kc = 1;
-    float kh = 1;
-
-    float delta_e00 = std::sqrt(std::pow(deltalp / (kl * sl), 2) + std::pow(deltacp / (kc * sc), 2) + std::pow(deltahp / (kh * sh), 2) + rt * (deltacp / (kc * sc)) * (deltahp / (kh * sh)));
-    return delta_e00;
+    return Slic3r::delta_e00_f(l1, a1, b1, l2, a2, b2);
 }
 
 float DeltaE94(float l1, float a1, float b1, float l2, float a2, float b2)
