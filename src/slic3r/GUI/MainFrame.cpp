@@ -2835,6 +2835,12 @@ void MainFrame::init_menubar_as_editor()
 
 #endif
 
+        append_menu_item(editMenu, wxID_ANY, _L("PicPrint on selected") + dots,
+            _L("Paint the selected object from a picture using mixed-filament recipes"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->picprint_on_selected(); },
+            "", nullptr, [this]() { return m_plater && m_plater->get_selected_object_idx() >= 0; }, this);
+        editMenu->AppendSeparator();
+
         // BBS Select All
         append_menu_item(editMenu, wxID_ANY, _L("Select all") + sep + ctrl_t + "A",
             _L("Selects all objects"), [this, handle_key_event](wxCommandEvent&) {

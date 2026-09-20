@@ -10,6 +10,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentConvert.hpp"
+#include "libslic3r/PicPrint.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <cstddef>
 #include <array>
+#include <cstring>
 #include <cctype>
 #include <cstdlib>
 #include <algorithm>
@@ -55,6 +57,7 @@
 #include <wx/statbox.h>
 #include <wx/statbmp.h>
 #include <wx/filedlg.h>
+#include <wx/image.h>
 #include <wx/dnd.h>
 #include <wx/progdlg.h>
 #include <wx/string.h>
@@ -8835,6 +8838,183 @@ bool Plater::convert_painted_colours_to_mixes(
             tab->select_preset(name);
     }
     return true;
+}
+
+void Plater::picprint_on_selected()
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return;
+
+    const int obj_idx = get_selected_object_idx();
+    if (obj_idx < 0 || obj_idx >= int(model().objects.size())) {
+        MessageDialog(this,
+            _L("Select an object to PicPrint."),
+            _L("PicPrint"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+    ModelObject *obj = model().objects[size_t(obj_idx)];
+    if (obj == nullptr || obj->volumes.empty() || obj->instances.empty()) {
+        MessageDialog(this,
+            _L("Select an object to PicPrint."),
+            _L("PicPrint"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    MessageDialog confirm(this,
+        _L("PicPrint paints the selected object from a picture using mixed-filament recipes. Not a lithophane / HueForge export."),
+        _L("PicPrint"), wxYES_NO | wxICON_QUESTION);
+    if (confirm.ShowModal() != wxID_YES)
+        return;
+
+    wxFileDialog file_dlg(this, _L("Choose a PNG or JPEG for PicPrint"), "", "",
+        "PNG/JPEG files (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg",
+        wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (file_dlg.ShowModal() != wxID_OK)
+        return;
+
+    wxImage img;
+    if (!img.LoadFile(file_dlg.GetPath()) || !img.IsOk() || img.GetData() == nullptr) {
+        MessageDialog(this,
+            _L("Could not load the picture."),
+            _L("PicPrint"), wxOK | wxICON_ERROR).ShowModal();
+        return;
+    }
+    const int img_w = img.GetWidth();
+    const int img_h = img.GetHeight();
+    if (img_w <= 0 || img_h <= 0) {
+        MessageDialog(this,
+            _L("Could not load the picture."),
+            _L("PicPrint"), wxOK | wxICON_ERROR).ShowModal();
+        return;
+    }
+
+    std::vector<std::uint8_t> rgb(size_t(img_w) * size_t(img_h) * 3);
+    std::memcpy(rgb.data(), img.GetData(), rgb.size());
+
+    std::vector<std::string> physical;
+    if (const ConfigOptionStrings *fc = bundle->project_config.option<ConfigOptionStrings>("filament_colour"))
+        physical = fc->values;
+    std::unordered_set<std::string> distinct;
+    for (const std::string &hex : physical) {
+        const std::string n = normalize_painted_colour_hex(hex);
+        if (!n.empty())
+            distinct.insert(n);
+    }
+    if (distinct.size() < 2) {
+        MessageDialog(this,
+            _L("Need at least two physical filament colours (prefer distinct colours on slots 1-4)."),
+            _L("PicPrint"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+
+    const size_t existing_mix = bundle->mixed_filaments.enabled_count();
+    PicPrintPlan plan = plan_picprint(rgb.data(), img_w, img_h, physical.size(), existing_mix);
+    if (!plan.valid) {
+        const wxString err = plan.error.empty()
+            ? _L("PicPrint failed.")
+            : wxString::FromUTF8(plan.error.c_str());
+        MessageDialog(this, err, _L("PicPrint"), wxOK | wxICON_ERROR).ShowModal();
+        return;
+    }
+
+    wxString preview = wxString::Format(_L("%d colour clusters:\n"), int(plan.cluster_count));
+    for (size_t i = 0; i < plan.cluster_hex.size(); ++i) {
+        if (i)
+            preview += ", ";
+        preview += wxString::FromUTF8(plan.cluster_hex[i].c_str());
+    }
+    preview += "\n\n";
+    preview += _L("Apply these mixes to the selected object?");
+    MessageDialog apply_dlg(this, preview, _L("PicPrint"), wxYES_NO | wxICON_QUESTION);
+    if (apply_dlg.ShowModal() != wxID_YES)
+        return;
+
+    std::vector<ModelColorEntry> colors;
+    colors.reserve(plan.cluster_hex.size());
+    for (size_t i = 0; i < plan.cluster_hex.size(); ++i) {
+        wxColour c;
+        if (!try_parse_color_match_hex(plan.cluster_hex[i], c))
+            continue;
+        ModelColorEntry entry;
+        entry.color_index  = static_cast<unsigned int>(i + 1);
+        entry.color        = c;
+        entry.hex_value    = plan.cluster_hex[i];
+        entry.extruder_ids = {static_cast<unsigned int>(i + 1)};
+        colors.push_back(std::move(entry));
+    }
+    if (colors.size() < 1) {
+        MessageDialog(this,
+            _L("PicPrint failed."),
+            _L("PicPrint"), wxOK | wxICON_ERROR).ShowModal();
+        return;
+    }
+
+    BatchMatchResult match = batch_match_model_colors(colors, physical, 0, 100, nullptr, nullptr, true);
+    if (!match.success || match.mappings.empty()) {
+        MessageDialog(this,
+            _L("PicPrint could not match the picture colours to mixed filaments."),
+            _L("PicPrint"), wxOK | wxICON_ERROR).ShowModal();
+        return;
+    }
+    match.mappings = merge_duplicate_recipe_mappings(match.mappings);
+    assign_batch_virtual_filament_ids(match, physical.size(), existing_mix);
+
+    std::vector<unsigned> cluster_to_dest(plan.cluster_count, 0);
+    auto assign_cluster = [&](unsigned idx, unsigned dest) {
+        if (idx >= 1 && idx <= plan.cluster_count && dest >= 1)
+            cluster_to_dest[idx - 1] = dest;
+    };
+    for (const ColorMappingEntry &m : match.mappings) {
+        assign_cluster(m.model_color_index, m.target_filament_id);
+        for (unsigned mi : m.merged_model_indices)
+            assign_cluster(mi, m.target_filament_id);
+    }
+    for (unsigned &d : cluster_to_dest) {
+        if (d == 0)
+            d = 1;
+    }
+
+    take_snapshot("PicPrint");
+
+    std::vector<MixedFilamentBatchEntry> entries;
+    for (const ColorMappingEntry &m : match.mappings) {
+        if (m.is_pure_recipe || m.in_place_edited)
+            continue;
+        MixedFilamentBatchEntry e;
+        e.component_a                = m.recipe.component_a;
+        e.component_b                = m.recipe.component_b;
+        e.mix_b_percent              = m.recipe.mix_b_percent;
+        e.manual_pattern             = m.recipe.manual_pattern;
+        e.gradient_component_ids     = m.recipe.gradient_component_ids;
+        e.gradient_component_weights = m.recipe.gradient_component_weights;
+        e.display_color              = m.matched_color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
+        entries.push_back(std::move(e));
+    }
+    std::vector<unsigned int> assigned;
+    bundle->mixed_filaments.add_batch_custom_filaments(entries, physical, &assigned);
+    if (ConfigOptionString *opt = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
+        opt->value = bundle->mixed_filaments.serialize_custom_entries();
+
+    picprint_set_dest_ids(plan, cluster_to_dest);
+
+    ModelInstance *inst     = obj->instances.front();
+    const BoundingBoxf3 xy_bbox = obj->instance_bounding_box(*inst);
+    size_t skipped_faces = 0;
+    for (ModelVolume *vol : obj->volumes) {
+        if (vol == nullptr || vol->mesh().empty() || !vol->is_model_part())
+            continue;
+        const Transform3d world = inst->get_matrix() * vol->get_matrix();
+        size_t            skipped = 0;
+        picprint_apply_to_volume(*vol, world, xy_bbox, plan, true, &skipped);
+        skipped_faces += skipped;
+    }
+
+    sidebar().update_mixed_filament_panel(false);
+    update();
+    BOOST_LOG_TRIVIAL(info) << "PicPrint: clusters=" << plan.cluster_count
+                            << " mixes=" << entries.size()
+                            << " skipped_faces=" << skipped_faces;
 }
 
 void Sidebar::cleanup_unused_filaments_after_batch_match(const BatchMatchResult &match_result,
