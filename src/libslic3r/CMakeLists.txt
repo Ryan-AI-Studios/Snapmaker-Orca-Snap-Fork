@@ -293,6 +293,10 @@ set(lisbslic3r_sources
     MixedFilament.hpp
     MixedFilamentConvert.cpp
     MixedFilamentConvert.hpp
+    MixedFilamentSwatch.cpp
+    MixedFilamentSwatch.hpp
+    ColorSpace.cpp
+    ColorSpace.hpp
     filament_mixer.cpp
     filament_mixer.h
     filament_mixer_model.h

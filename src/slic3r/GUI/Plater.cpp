@@ -1927,7 +1927,13 @@ private:
         const int                      min_component_percent = m_min_component_percent;
         wxWeakRef<wxWindow>            weak_self(this);
         std::thread([weak_self, physical_colors, requested_target, request_token, min_component_percent]() {
-            MixedColorMatchRecipeResult recipe = build_best_color_match_recipe(physical_colors, requested_target, min_component_percent);
+            Slic3r::SwatchLut swatch_lut;
+            std::string       live_batch;
+            const bool        have_swatch = load_active_swatch_lut(physical_colors, swatch_lut, live_batch);
+            MixedColorMatchRecipeResult recipe = build_best_color_match_recipe(
+                physical_colors, requested_target, min_component_percent, 100, true,
+                have_swatch ? &swatch_lut : nullptr,
+                have_swatch ? &live_batch : nullptr);
             wxGetApp().CallAfter([weak_self, requested_target, recipe = std::move(recipe), request_token]() mutable {
                 if (!weak_self)
                     return;

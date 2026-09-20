@@ -177,6 +177,9 @@ void AppConfig::set_defaults()
 
         if (get("convert_painted_colours_to_mixes").empty())
             set("convert_painted_colours_to_mixes", "1");
+
+        if (get("use_measured_swatch_calibration").empty())
+            set("use_measured_swatch_calibration", "0");
     }
     else {
 #ifdef _WIN32
