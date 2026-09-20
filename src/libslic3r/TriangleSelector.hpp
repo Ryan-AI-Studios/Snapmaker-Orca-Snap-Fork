@@ -295,6 +295,15 @@ public:
     // Called by select_patch() internally. Made public for debugging purposes, see TriangleSelectorGUI::render_debug().
     void set_edge_limit(float edge_limit);
 
+    // Paint state of original triangle if it is not split; NONE if split or OOB.
+    EnforcerBlockerType orig_facet_state(int orig_facet) const;
+
+    // Paint state of the unsplit leaf containing `p` on original triangle `orig_facet`.
+    EnforcerBlockerType state_at_point(int orig_facet, const Vec3f &p) const;
+
+    // Cursor-free dest split for keep-paint reprojection. Does not use m_cursor.
+    void split_dest_triangle(int facet_idx);
+
     // Create new object on a TriangleMesh. The referenced mesh must
     // stay valid, a ptr to it is saved and used.
     explicit TriangleSelector(const TriangleMesh& mesh, float edge_limit = 0.6f);

@@ -18492,6 +18492,10 @@ void Plater::cut_horizontal(size_t obj_idx, size_t instance_idx, double z, Model
 
     const Vec3d instance_offset = object->instances[instance_idx]->get_offset();
     Cut         cut(object, instance_idx, Geometry::translation_transform(z * Vec3d::UnitZ() - instance_offset), attributes);
+    if (wxGetApp().app_config != nullptr) {
+        const std::string v = wxGetApp().app_config->get("keep_painting");
+        cut.set_keep_painting(v.empty() || v == "1" || v == "true");
+    }
     const auto  new_objects = cut.perform_with_plane();
 
     apply_cut_object_to_model(obj_idx, new_objects);
@@ -23496,13 +23500,15 @@ bool Plater::set_printer_technology(PrinterTechnology printer_technology)
     return ret;
 }
 
-void Plater::clear_before_change_mesh(int obj_idx)
+void Plater::clear_before_change_mesh(int obj_idx, bool wipe_paint)
 {
     ModelObject* mo = model().objects[obj_idx];
 
     // If there are custom supports/seams/mmu/fuzzy skin segmentation, remove them. Fixed mesh
     // may be different and they would make no sense.
     bool paint_removed = false;
+    if (!wipe_paint)
+        return;
     for (ModelVolume* mv : mo->volumes) {
         paint_removed |= ! mv->supported_facets.empty() || ! mv->seam_facets.empty() || ! mv->mmu_segmentation_facets.empty() || !mv->fuzzy_skin_facets.empty();
         mv->supported_facets.reset();

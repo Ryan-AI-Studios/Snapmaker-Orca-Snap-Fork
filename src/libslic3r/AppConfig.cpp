@@ -180,6 +180,9 @@ void AppConfig::set_defaults()
 
         if (get("use_measured_swatch_calibration").empty())
             set("use_measured_swatch_calibration", "0");
+
+        if (get("keep_painting").empty())
+            set("keep_painting", "1");
     }
     else {
 #ifdef _WIN32
