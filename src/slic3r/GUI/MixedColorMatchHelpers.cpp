@@ -1548,6 +1548,24 @@ std::vector<ModelColorEntry> extract_model_colors(const Print& print)
     return colors;
 }
 
+std::vector<ModelColorEntry> model_colors_from_painted_palette(const PaintedSourcePalette& palette)
+{
+    std::vector<ModelColorEntry> colors;
+    colors.reserve(palette.colors.size());
+    for (const PaintedSourceColor& src : palette.colors) {
+        wxColour c;
+        if (!try_parse_color_match_hex(src.hex, c))
+            continue;
+        ModelColorEntry entry;
+        entry.color_index   = static_cast<unsigned int>(colors.size() + 1);
+        entry.color         = c;
+        entry.hex_value     = src.hex;
+        entry.extruder_ids  = src.extruder_ids;
+        colors.push_back(std::move(entry));
+    }
+    return colors;
+}
+
 // ---- Batch Match Algorithm ----
 
 #if 0 // Dead code — no deduplication is performed (explicit policy since phase2)
@@ -1831,7 +1849,7 @@ void populate_mixed_filaments_from_mappings(
     }
 }
 
-void apply_batch_match_to_model(const BatchMatchResult& result)
+void apply_batch_match_to_model(const BatchMatchResult& result, Model& model, PresetBundle& preset_bundle)
 {
     if (!result.success || result.mappings.empty()) return;
 
@@ -1848,8 +1866,7 @@ void apply_batch_match_to_model(const BatchMatchResult& result)
 
     // Compute total filaments: physical + all mixed (including newly created).
     // Use project_config filament_colour — same source as Plater callback `colors`.
-    PresetBundle* pb = wxGetApp().preset_bundle;
-    if (!pb) return;
+    PresetBundle* pb = &preset_bundle;
     ConfigOptionStrings* co = pb->project_config.option<ConfigOptionStrings>("filament_colour");
     if (!co || co->values.empty()) return;
     const size_t num_physical    = co->values.size();
@@ -1883,7 +1900,7 @@ void apply_batch_match_to_model(const BatchMatchResult& result)
     //      early-continued on non-MODEL_PART, dropping the modifier's colour
     //      (it then fell back to the object's extruder, which itself may have
     //      been remapped — surfacing as "colour reset to extruder 1").
-    for (ModelObject* mo : wxGetApp().model().objects) {
+    for (ModelObject* mo : model.objects) {
         // Pre-read the object's effective extruder ONCE, before iterating volumes.
         // ModelVolume::extruder_id() falls back to the OBJECT config when a volume
         // has no own "extruder", and this loop rewrites that object config — so

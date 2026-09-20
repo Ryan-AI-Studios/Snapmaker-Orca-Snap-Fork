@@ -4,6 +4,7 @@
 // MixedColorMatchPanel.cpp. Implementations live in Plater.cpp.
 
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/MixedFilamentConvert.hpp"
 
 #include <wx/wx.h>
 #include <wx/bitmap.h>
@@ -16,7 +17,11 @@
 #include <functional>
 #include <memory>
 
-namespace Slic3r { class Print; }
+namespace Slic3r {
+class Print;
+class Model;
+class PresetBundle;
+}
 
 namespace Slic3r { namespace GUI {
 
@@ -234,6 +239,9 @@ struct BatchMatchResult
 /// Caps at 64 colors. Logs and skips malformed colors.
 std::vector<ModelColorEntry> extract_model_colors(const Slic3r::Print& print);
 
+/// Print-free colour list for on-open convert, built from an in-memory capture.
+std::vector<ModelColorEntry> model_colors_from_painted_palette(const PaintedSourcePalette& palette);
+
 /// Main entry: batch-match all model colors to filament recipes.
 /// Callable from background thread (cancel_token checked per-color).
 BatchMatchResult batch_match_model_colors(
@@ -282,6 +290,6 @@ void populate_mixed_filaments_from_mappings(
 /// Apply matched recipes back to model painting data.
 /// Walks every volume's mmu_segmentation_facets and remaps original
 /// extruder_id→target_filament_id from the match result.
-void apply_batch_match_to_model(const BatchMatchResult& result);
+void apply_batch_match_to_model(const BatchMatchResult& result, Model& model, PresetBundle& preset_bundle);
 
 }} // namespace Slic3r::GUI

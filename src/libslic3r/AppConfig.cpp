@@ -174,6 +174,9 @@ void AppConfig::set_defaults()
 
         if (get("default_page").empty())
             set("default_page", "0");
+
+        if (get("convert_painted_colours_to_mixes").empty())
+            set("convert_painted_colours_to_mixes", "1");
     }
     else {
 #ifdef _WIN32

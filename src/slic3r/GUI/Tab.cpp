@@ -2118,7 +2118,13 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
                     new_colors.push_back(new_color);
                 }
             }
-        } 
+        }
+        const std::string printer_name = wxGetApp().preset_bundle->printers.get_edited_preset().name;
+        const bool shrinking = old_filament_size > static_cast<int>(num_extruder);
+        if (shrinking && printer_name.find("WonderMaker ZR Ultra S") != std::string::npos &&
+            wxGetApp().plater() != nullptr) {
+            wxGetApp().plater()->maybe_prompt_convert_painted_colours(false, false, nullptr);
+        }
         wxGetApp().preset_bundle->set_num_filaments(num_extruder, new_colors);
         wxGetApp().plater()->on_filaments_change(num_extruder);
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
