@@ -1010,6 +1010,8 @@ public:
         bool                        adopt_zr_ultra_s,
         Model                      *model_override = nullptr);
 
+    void picprint_on_selected();
+
 private:
     struct priv;
     std::unique_ptr<priv> p;
