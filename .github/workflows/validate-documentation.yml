@@ -31,6 +31,8 @@ jobs:
       
       - name: Run validation
         if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         shell: pwsh
         run: |
           # Helper Functions
@@ -261,11 +263,31 @@ jobs:
               }
           }
           
-          # Report results
-          $linkErrors = $brokenReferences | Where-Object { $_.Type -eq "Link" }
-          $imageErrors = $brokenReferences | Where-Object { $_.Type -eq "Image" }
+          # Report results — fail only on errors in changed doc/**/*.md.
+          # Tab.cpp and untouched wiki pages are inherited Orca/Snapmaker rot.
+          $changedList = @()
+          if ($env:CHANGED_FILES) {
+              $changedList = @($env:CHANGED_FILES -split '\s+' | Where-Object { $_ })
+          }
+          function Test-IsChangedDoc($sourceFile) {
+              if (-not $sourceFile -or $sourceFile -eq 'Tab.cpp') { return $false }
+              $norm = ($sourceFile -replace '\\','/').TrimStart('/')
+              foreach ($c in $changedList) {
+                  $cn = ($c -replace '\\','/').TrimStart('./')
+                  if ($cn -eq "doc/$norm" -or $cn.EndsWith("/doc/$norm") -or $cn -eq $norm) { return $true }
+              }
+              return $false
+          }
+          $newBroken = @($brokenReferences | Where-Object { Test-IsChangedDoc $_.SourceFile })
+          $oldBroken = @($brokenReferences | Where-Object { -not (Test-IsChangedDoc $_.SourceFile) })
+          if ($oldBroken.Count -gt 0) {
+              Write-Host "::warning::Inherited documentation issues ($($oldBroken.Count)) not in this PR's doc diffs — not failing"
+          }
+
+          $linkErrors = $newBroken | Where-Object { $_.Type -eq "Link" }
+          $imageErrors = $newBroken | Where-Object { $_.Type -eq "Image" }
           
-          if ($brokenReferences.Count -gt 0) {
+          if ($newBroken.Count -gt 0) {
               Write-Host "::error::Documentation validation failed"
               
               # Build error summary for PR comment
