@@ -33,6 +33,8 @@
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/PaintReproject.hpp"
+#include "libslic3r/AppConfig.hpp"
 
 #ifdef __WXMSW__
 #include "wx/uiaction.h"
@@ -5591,10 +5593,27 @@ void ObjectList::fix_through_netfabb()
             msg += "\n";
         }
 
-        plater->clear_before_change_mesh(obj_idx);
+        bool keep_paint = true;
+        if (wxGetApp().app_config != nullptr) {
+            const std::string v = wxGetApp().app_config->get("keep_painting");
+            keep_paint = v.empty() || v == "1" || v == "true";
+        }
+        struct RepairSnap { SavedPainting paint; TriangleMesh mesh; };
+        std::vector<RepairSnap> snaps;
+        if (keep_paint && object(obj_idx) != nullptr) {
+            for (ModelVolume *mv : object(obj_idx)->volumes)
+                snaps.push_back({snapshot_volume_painting(*mv), mv->mesh()});
+        }
+        plater->clear_before_change_mesh(obj_idx, !keep_paint);
         std::string res;
         if (!fix_model_by_win10_sdk_gui(*(object(obj_idx)), vol_idx, progress_dlg, msg, res))
             return false;
+        if (keep_paint && object(obj_idx) != nullptr) {
+            ModelObject *mo = object(obj_idx);
+            const size_t n = std::min(snaps.size(), mo->volumes.size());
+            for (size_t i = 0; i < n; ++i)
+                reproject_volume_spatial(*mo->volumes[i], snaps[i].paint, snaps[i].mesh, 1.0f, nullptr);
+        }
         //wxGetApp().plater()->changed_mesh(obj_idx);
         object(obj_idx)->ensure_on_bed();
         plater->changed_mesh(obj_idx);
