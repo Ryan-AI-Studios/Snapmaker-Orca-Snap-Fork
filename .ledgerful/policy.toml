@@ -1,0 +1,11 @@
+# CI-safe Ledgerful policy. This file is intentionally committed even though
+# other .ledgerful state remains local and ignored.
+preset = "enforce"
+
+[rules]
+# CI runners do not receive the local ledger database or bound verification runs.
+require_signed_entries = false
+no_pending_tx = true
+verification_must_pass = false
+max_risk_without_adr = "high"
+fail_on = "high"
