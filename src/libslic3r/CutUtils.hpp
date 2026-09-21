@@ -22,6 +22,7 @@ class Cut {
     int                         m_instance;
     const Transform3d           m_cut_matrix;
     ModelObjectCutAttributes    m_attributes;
+    bool                        m_keep_painting = true;
 
     void post_process(ModelObject* object, ModelObjectPtrs& objects, bool keep, bool place_on_cut, bool flip);
     void post_process(ModelObject* upper_object, ModelObject* lower_object, ModelObjectPtrs& objects);
@@ -54,6 +55,10 @@ public:
         bool selected;
         bool is_modifier;
     };
+
+    void set_keep_painting(bool keep) { m_keep_painting = keep; }
+    bool keep_painting() const { return m_keep_painting; }
+    bool set_offset_for_two_part = false;
 
     const ModelObjectPtrs& perform_with_plane();
     const ModelObjectPtrs& perform_by_contour(std::vector<Part> parts, int dowels_count);

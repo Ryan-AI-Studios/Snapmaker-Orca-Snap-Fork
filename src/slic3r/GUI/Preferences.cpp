@@ -1268,6 +1268,11 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_calc_mode = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time the color changed."), page, _L("If enabled, auto-calculate every time the color changed."), 50, "auto_calculate");
     auto item_calc_in_long_retract = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time when the filament is changed."), page, _L("If enabled, auto-calculate every time when filament is changed"), 50, "auto_calculate_when_filament_change");
     auto item_remember_printer_config = create_item_checkbox(_L("Remember printer configuration"), page, _L("If enabled, Orca will remember and switch filament/process configuration for each printer automatically."), 50, "remember_printer_config");
+    auto item_convert_painted = create_item_checkbox(_L("Prompt to convert painted colours to mixes"), page, _L("When opening or switching a project with more than four painted colours, ask to convert them to mixed filaments for the WonderMaker ZR Ultra S before colours are lost."), 50, "convert_painted_colours_to_mixes");
+    auto item_remap_four_color = create_item_checkbox(_L("Prompt to remap four-colour projects onto toolheads"), page, _L("When opening or switching a project with four or fewer source colours, ask to map source slots onto the WonderMaker ZR Ultra S toolheads."), 50, "prompt_remap_four_color_projects");
+    auto item_swatch_cal = create_item_checkbox(_L("Use measured swatch calibration for colour matching"), page, _L("When enabled, Color Mixing Match ranks recipes using an imported CIELab swatch LUT. Off (default) keeps predicted ΔE ranking."), 50, "use_measured_swatch_calibration");
+    auto item_keep_painting = create_item_checkbox(_L("Keep painting through Cut and Fix Model"), page, _L("Preserve painted colour and mixed-filament IDs when cutting or repairing a mesh. Off restores the old behaviour of wiping paint."), 50, "keep_painting");
+    auto item_swatch_cal = create_item_checkbox(_L("Use measured swatch calibration for colour matching"), page, _L("When enabled, Color Mixing Match ranks recipes using an imported CIELab swatch LUT. Off (default) keeps predicted ΔE ranking."), 50, "use_measured_swatch_calibration");
     auto item_step_mesh_setting = create_item_checkbox(_L("Show the step mesh parameter setting dialog."), page, _L("If enabled,a parameter settings dialog will appear during STEP file import."), 50, "enable_step_mesh_setting");
     auto item_multi_machine = create_item_checkbox(_L("Multi-device Management (Take effect after restarting Snapmaker Orca)."), page, _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), 50, "enable_multi_machine");
     auto item_auto_arrange  = create_item_checkbox(_L("Auto arrange plate after cloning"), page, _L("Auto arrange plate after object cloning"), 50, "auto_arrange");
@@ -1377,6 +1382,11 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_user_sync, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_system_sync, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_remember_printer_config, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_convert_painted, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_remap_four_color, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_swatch_cal, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_keep_painting, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_swatch_cal, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_save_presets, 0, wxTOP, FromDIP(3));
     //sizer_page->Add(title_network, 0, wxTOP | wxEXPAND, FromDIP(20));
     //sizer_page->Add(item_check_stable_version_only, 0, wxTOP, FromDIP(3));

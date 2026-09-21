@@ -168,6 +168,9 @@ public:
     // many-second) deletion loop. Default-empty: existing callers see no change.
     void cleanup_unused_filaments_after_batch_match(const BatchMatchResult& match_result,
                                                     std::function<void(int /*current*/, int /*total*/)> on_progress = nullptr);
+    // Palette rewrite + mix create + paint remap + cleanup. Shared by the Color
+    // Mixing Match button and the on-open / printer-switch convert hook.
+    void apply_batch_match_result(const BatchMatchResult& result, Model* model = nullptr);
     void add_custom_filament(wxColour new_col);
     void edit_filament();
 
@@ -517,7 +520,7 @@ public:
     void reslice_SLA_hollowing(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &object, bool postpone_error_messages = false);
 
-    void clear_before_change_mesh(int obj_idx);
+    void clear_before_change_mesh(int obj_idx, bool wipe_paint = true);
     void changed_mesh(int obj_idx);
 
     void changed_object(ModelObject &object);
@@ -993,6 +996,36 @@ public:
 
     bool is_loading_project() const { return m_loading_project; }
 
+    enum class ConvertPaintedResult { Skipped, Disabled, Ineligible, Kept, Converted };
+    enum class RemapFourColorResult { Skipped, Disabled, Ineligible, Cancelled, Applied };
+
+    // Consent-first convert of >4 painted colours to mixes. model_override is
+    // the incoming 3MF model for T2 (geometry-only) before it is merged.
+    ConvertPaintedResult maybe_prompt_convert_painted_colours(
+        bool         restore_or_silence,
+        bool         adopt_zr_ultra_s,
+        Model       *model_override = nullptr);
+
+    bool convert_painted_colours_to_mixes(
+        const PaintedSourcePalette &captured,
+        bool                        adopt_zr_ultra_s,
+        Model                      *model_override = nullptr);
+
+    // Consent-first ≤4-colour physical remap. Run after convert returns
+    // Ineligible or Disabled. model_override is T2 incoming geometry.
+    RemapFourColorResult maybe_prompt_remap_four_color_project(
+        bool         restore_or_silence,
+        bool         adopt_zr_ultra_s,
+        Model       *model_override = nullptr);
+
+    void maybe_prompt_convert_then_remap(
+        bool         restore_or_silence,
+        bool         adopt_zr_ultra_s,
+        Model       *model_override = nullptr);
+
+    void picprint_on_selected();
+    void ofd_open_catalog();
+
 private:
     struct priv;
     std::unique_ptr<priv> p;
@@ -1009,6 +1042,8 @@ private:
     bool m_exported_file { false };
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
+    bool m_convert_painted_in_progress { false };
+    bool m_remap_four_color_in_progress { false };
     std::string m_preview_only_filename;
     int m_valid_plates_count { 0 };
 

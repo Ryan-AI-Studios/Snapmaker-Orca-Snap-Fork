@@ -2835,6 +2835,23 @@ void MainFrame::init_menubar_as_editor()
 
 #endif
 
+        append_menu_item(editMenu, wxID_ANY, _L("PicPrint on selected") + dots,
+            _L("Paint the selected object from a picture using mixed-filament recipes"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->picprint_on_selected(); },
+            "", nullptr, [this]() { return m_plater && m_plater->get_selected_object_idx() >= 0; }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("OFD catalog") + dots,
+            _L("Stamp an Open Filament Database colour onto an existing physical slot"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->ofd_open_catalog(); },
+            "", nullptr, [this]() { return m_plater != nullptr; }, this);
+        append_menu_item(editMenu, wxID_ANY, _L("Remap toolheads") + dots,
+            _L("Map source filament slots onto the four physical ZR Ultra S toolheads"),
+            [this](wxCommandEvent&) {
+                if (m_plater)
+                    m_plater->maybe_prompt_remap_four_color_project(false, false, nullptr);
+            },
+            "", nullptr, [this]() { return m_plater != nullptr; }, this);
+        editMenu->AppendSeparator();
+
         // BBS Select All
         append_menu_item(editMenu, wxID_ANY, _L("Select all") + sep + ctrl_t + "A",
             _L("Selects all objects"), [this, handle_key_event](wxCommandEvent&) {

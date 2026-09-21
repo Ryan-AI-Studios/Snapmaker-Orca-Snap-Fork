@@ -3359,6 +3359,10 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         update_object_cut_id(cut_mo->cut_id, attributes, dowels_count);
 
         Cut cut(cut_mo, instance_idx, get_cut_matrix(selection), attributes);
+        if (wxGetApp().app_config != nullptr) {
+            const std::string v = wxGetApp().app_config->get("keep_painting");
+            cut.set_keep_painting(v.empty() || v == "1" || v == "true");
+        }
         const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(m_part_selection.get_cut_parts(), dowels_count):
                                              cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m) :
                                                                  cut.perform_with_plane();

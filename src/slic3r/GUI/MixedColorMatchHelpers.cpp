@@ -21,6 +21,9 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp" // GetFilamentMatchName (family preset scan)
+#include "libslic3r/MixedFilamentSwatch.hpp"
+#include "libslic3r/ColorSpace.hpp"
+#include "libslic3r/AppConfig.hpp"
 
 namespace Slic3r { namespace GUI {
 wxColour parse_mixed_color(const std::string& value)
@@ -288,18 +291,12 @@ BlendLUT::BlendLUT(size_t n) : m_n(n)
 
 CIELab sRGB_to_CIELab(const wxColour& c)
 {
-    double r = c.Red()   / 255.0;
-    double g = c.Green() / 255.0;
-    double b = c.Blue()  / 255.0;
-    float lab[3];
-    RGB2Lab(float(r), float(g), float(b), &lab[0], &lab[1], &lab[2]);
-    return { double(lab[0]), double(lab[1]), double(lab[2]) };
+    return rgb_u8_to_lab(c.Red(), c.Green(), c.Blue());
 }
 
 double delta_e_lab(const CIELab& a, const CIELab& b)
 {
-    return double(DeltaE00(float(a.L), float(a.a), float(a.b),
-                           float(b.L), float(b.a), float(b.b)));
+    return delta_e00(a, b);
 }
 
 BlendLUT build_blend_lut(const std::vector<wxColour>& palette)
@@ -353,22 +350,40 @@ CIELab blend_weighted_lab_accurate(const std::vector<wxColour>& palette,
 
 double color_delta_e00(const wxColour& lhs, const wxColour& rhs)
 {
-    float lhs_l = 0.f, lhs_a = 0.f, lhs_b = 0.f;
-    float rhs_l = 0.f, rhs_a = 0.f, rhs_b = 0.f;
-    RGB2Lab(float(lhs.Red()) / 255.f, float(lhs.Green()) / 255.f, float(lhs.Blue()) / 255.f, &lhs_l, &lhs_a, &lhs_b);
-    RGB2Lab(float(rhs.Red()) / 255.f, float(rhs.Green()) / 255.f, float(rhs.Blue()) / 255.f, &rhs_l, &rhs_a, &rhs_b);
-    return double(DeltaE00(lhs_l, lhs_a, lhs_b, rhs_l, rhs_a, rhs_b));
+    return delta_e00(sRGB_to_CIELab(lhs), sRGB_to_CIELab(rhs));
+}
+
+bool load_active_swatch_lut(const std::vector<std::string> &physical_colors,
+                            Slic3r::SwatchLut              &out,
+                            std::string                    &live_key)
+{
+    AppConfig *cfg = wxGetApp().app_config;
+    if (cfg == nullptr)
+        return false;
+    const std::string val = cfg->get("use_measured_swatch_calibration");
+    if (val != "1" && val != "true")
+        return false;
+    live_key = compute_swatch_batch_key(physical_colors, {});
+    Slic3r::SwatchParseReport report;
+    if (!load_swatch_lut_file(default_swatch_lut_path(), out, report) || !report.ok)
+        return false;
+    if (lut_is_stale(out, live_key))
+        return false;
+    return true;
 }
 
 MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std::string>& physical_colors,
                                                           const wxColour&                 target_color,
                                                           int                             min_component_percent,
                                                           int                             max_component_percent,
-                                                          bool                            check_compatible)
+                                                          bool                            check_compatible,
+                                                          const Slic3r::SwatchLut        *swatch_lut,
+                                                          const std::string              *live_batch_key)
 {
     MixedColorMatchRecipeResult best;
     if (!target_color.IsOk() || physical_colors.size() < 2)
         return best;
+    const std::string live_batch = live_batch_key != nullptr ? *live_batch_key : std::string{};
 
     // Validate max_component_percent symmetrically with batch_match_model_colors's
     // min check. Range [50, 100]: the floor matches loop_min_weight's clamp ceiling
@@ -428,17 +443,22 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
         return ss.str();
     };
 
+    auto score = [&](const CIELab &predicted, const std::string &key, bool *measured) {
+        return candidate_distance(target_lab, predicted, swatch_lut, key, live_batch, measured);
+    };
+
     // ---- Step 2: build pair Blend LUT (polynomial mixing → Lab) ----
     const BlendLUT lut = build_blend_lut(palette);
     if (lut.empty()) return best;
 
     // ---- helper: update best from a pair candidate ----
-    auto update_best_pair = [&](unsigned int a, unsigned int b, int pct, double de) {
+    auto update_best_pair = [&](unsigned int a, unsigned int b, int pct, double de, bool measured) {
         if (!best.valid || de + 1e-6 < best.delta_e) {
             best.valid         = true;
             best.component_a   = a;
             best.component_b   = b;
             best.mix_b_percent = pct;
+            best.used_measured_lab = measured;
             best.preview_color = blend_pair_filament_mixer(palette[a - 1], palette[b - 1], float(pct) / 100.f);
             best.delta_e       = de;
             best.gradient_component_ids.clear();
@@ -461,8 +481,9 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
             if (!compat[a][b]) continue;
             for (int pct = std::max(loop_min_weight, 100 - max_component_percent); pct <= std::min(100 - loop_min_weight, max_component_percent); pct += k_coarse_step) {
                 const CIELab& blended_lab = lut.get(a, b, pct);
-                double de = delta_e_lab(target_lab, blended_lab);
-                update_best_pair(unsigned(a + 1), unsigned(b + 1), pct, de);
+                bool measured = false;
+                double de = score(blended_lab, snap_recipe_key_pair(unsigned(a + 1), unsigned(b + 1), pct), &measured);
+                update_best_pair(unsigned(a + 1), unsigned(b + 1), pct, de, measured);
                 if (heap.size() < k_top_coarse) {
                     heap.emplace(de, unsigned(a + 1), unsigned(b + 1), pct);
                 } else if (de < std::get<0>(heap.top())) {
@@ -482,7 +503,9 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
         for (int pct = fine_min; pct <= fine_max; ++pct) {
             if ((pct - loop_min_weight) % k_coarse_step == 0) continue; // already evaluated in coarse
             const CIELab& blended_lab = lut.get(a - 1, b - 1, pct);
-            update_best_pair(a, b, pct, delta_e_lab(target_lab, blended_lab));
+            bool measured = false;
+            double de2 = score(blended_lab, snap_recipe_key_pair(a, b, pct), &measured);
+            update_best_pair(a, b, pct, de2, measured);
         }
     }
 
@@ -497,7 +520,8 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
     std::vector<std::pair<double, unsigned int>> ranked_ids;
     ranked_ids.reserve(n);
     for (size_t idx = 0; idx < n; ++idx)
-        ranked_ids.emplace_back(delta_e_lab(target_lab, palette_lab[idx]), unsigned(idx + 1));
+        ranked_ids.emplace_back(score(palette_lab[idx], snap_recipe_key_phys(unsigned(idx + 1)), nullptr),
+                                unsigned(idx + 1));
     std::sort(ranked_ids.begin(), ranked_ids.end(), [](const auto& x, const auto& y) {
         if (x.first != y.first) return x.first < y.first;
         return x.second < y.second;
@@ -538,7 +562,11 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
                         int wc = 100 - wa - wb;
                         if (wc < loop_min_weight || wc > max_component_percent) continue;
                         CIELab blended = blend_weighted_lab_accurate(palette, {a, b, c}, {wa, wb, wc});
-                        double  de      = delta_e_lab(target_lab, blended);
+                        bool measured = false;
+                        double de = score(blended,
+                                          snap_recipe_key_grad(encode_gradient_ids({a, b, c}),
+                                                               encode_gradient_weights({wa, wb, wc})),
+                                          &measured);
                         // Update best triple
                         if (!best.valid || de + 1e-6 < best.delta_e) {
                             best.valid     = true;
@@ -551,6 +579,7 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
                                 {palette[a - 1], palette[b - 1], palette[c - 1]},
                                 {double(wa), double(wb), double(wc)});
                             best.delta_e = de;
+                            best.used_measured_lab = measured;
                             best.manual_pattern.clear();
                         }
                         if (triple_heap.size() < k_top_triple) {
@@ -580,7 +609,11 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
                 int wc = 100 - wa - wb;
                 if (wc < loop_min_weight || wc > max_component_percent) continue;
                 CIELab blended = blend_weighted_lab_accurate(palette, {te.a, te.b, te.c}, {wa, wb, wc});
-                double  de2    = delta_e_lab(target_lab, blended);
+                bool measured = false;
+                double de2 = score(blended,
+                                   snap_recipe_key_grad(encode_gradient_ids({te.a, te.b, te.c}),
+                                                        encode_gradient_weights({wa, wb, wc})),
+                                   &measured);
                 if (!best.valid || de2 + 1e-6 < best.delta_e) {
                     best.valid     = true;
                     best.component_a = te.a;
@@ -592,6 +625,7 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
                         {palette[te.a - 1], palette[te.b - 1], palette[te.c - 1]},
                         {double(wa), double(wb), double(wc)});
                     best.delta_e = de2;
+                    best.used_measured_lab = measured;
                     best.manual_pattern.clear();
                 }
             }
@@ -602,10 +636,19 @@ MixedColorMatchRecipeResult build_best_color_match_recipe(const std::vector<std:
     // Pair and triple search may use different evaluation paths (LUT vs on-the-fly
     // blend_multi_filament_mixer); re-evaluate both via the same pipeline for a fair
     // comparison, then prefer the simpler (pair) recipe when ΔE gain is negligible.
-    if (best.valid)
-        best.delta_e = color_delta_e00(target_color, best.preview_color);
+    auto reeval = [&](MixedColorMatchRecipeResult &r) {
+        if (!r.valid)
+            return;
+        const std::string key = r.gradient_component_ids.empty()
+            ? snap_recipe_key_pair(r.component_a, r.component_b, r.mix_b_percent)
+            : snap_recipe_key_grad(r.gradient_component_ids, r.gradient_component_weights);
+        bool measured = false;
+        r.delta_e = score(sRGB_to_CIELab(r.preview_color), key, &measured);
+        r.used_measured_lab = measured;
+    };
+    reeval(best);
+    reeval(best_pair);
     if (best_pair.valid) {
-        best_pair.delta_e = color_delta_e00(target_color, best_pair.preview_color);
         // Pick the true winner under unified evaluation
         if (!best.valid || best_pair.delta_e + 1e-6 < best.delta_e)
             best = std::move(best_pair);
@@ -1548,6 +1591,24 @@ std::vector<ModelColorEntry> extract_model_colors(const Print& print)
     return colors;
 }
 
+std::vector<ModelColorEntry> model_colors_from_painted_palette(const PaintedSourcePalette& palette)
+{
+    std::vector<ModelColorEntry> colors;
+    colors.reserve(palette.colors.size());
+    for (const PaintedSourceColor& src : palette.colors) {
+        wxColour c;
+        if (!try_parse_color_match_hex(src.hex, c))
+            continue;
+        ModelColorEntry entry;
+        entry.color_index   = static_cast<unsigned int>(colors.size() + 1);
+        entry.color         = c;
+        entry.hex_value     = src.hex;
+        entry.extruder_ids  = src.extruder_ids;
+        colors.push_back(std::move(entry));
+    }
+    return colors;
+}
+
 // ---- Batch Match Algorithm ----
 
 #if 0 // Dead code — no deduplication is performed (explicit policy since phase2)
@@ -1735,6 +1796,11 @@ BatchMatchResult batch_match_model_colors(
     }
 
     const int total_count = static_cast<int>(model_colors.size());
+    Slic3r::SwatchLut swatch_lut;
+    std::string       live_batch;
+    const bool        have_swatch = load_active_swatch_lut(physical_colors, swatch_lut, live_batch);
+    const Slic3r::SwatchLut *swatch_ptr = have_swatch ? &swatch_lut : nullptr;
+    const std::string *batch_ptr = have_swatch ? &live_batch : nullptr;
     for (size_t i = 0; i < model_colors.size(); ++i) {
         if (cancel_token && cancel_token->load()) {
             // User cancellation (Stop Matching) — not an error. error_message is intentionally
@@ -1748,7 +1814,7 @@ BatchMatchResult batch_match_model_colors(
         const auto& entry = model_colors[i];
         MixedColorMatchRecipeResult recipe =
             build_best_color_match_recipe(physical_colors, entry.color, min_component_percent, max_component_percent,
-                                          check_compatible);
+                                          check_compatible, swatch_ptr, batch_ptr);
 
         if (!recipe.valid) {
             BOOST_LOG_TRIVIAL(warning)
@@ -1831,7 +1897,7 @@ void populate_mixed_filaments_from_mappings(
     }
 }
 
-void apply_batch_match_to_model(const BatchMatchResult& result)
+void apply_batch_match_to_model(const BatchMatchResult& result, Model& model, PresetBundle& preset_bundle)
 {
     if (!result.success || result.mappings.empty()) return;
 
@@ -1848,8 +1914,7 @@ void apply_batch_match_to_model(const BatchMatchResult& result)
 
     // Compute total filaments: physical + all mixed (including newly created).
     // Use project_config filament_colour — same source as Plater callback `colors`.
-    PresetBundle* pb = wxGetApp().preset_bundle;
-    if (!pb) return;
+    PresetBundle* pb = &preset_bundle;
     ConfigOptionStrings* co = pb->project_config.option<ConfigOptionStrings>("filament_colour");
     if (!co || co->values.empty()) return;
     const size_t num_physical    = co->values.size();
@@ -1883,7 +1948,7 @@ void apply_batch_match_to_model(const BatchMatchResult& result)
     //      early-continued on non-MODEL_PART, dropping the modifier's colour
     //      (it then fell back to the object's extruder, which itself may have
     //      been remapped — surfacing as "colour reset to extruder 1").
-    for (ModelObject* mo : wxGetApp().model().objects) {
+    for (ModelObject* mo : model.objects) {
         // Pre-read the object's effective extruder ONCE, before iterating volumes.
         // ModelVolume::extruder_id() falls back to the OBJECT config when a volume
         // has no own "extruder", and this loop rewrites that object config — so

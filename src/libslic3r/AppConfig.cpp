@@ -174,6 +174,20 @@ void AppConfig::set_defaults()
 
         if (get("default_page").empty())
             set("default_page", "0");
+
+        if (get("convert_painted_colours_to_mixes").empty())
+            set("convert_painted_colours_to_mixes", "1");
+
+        if (get("prompt_remap_four_color_projects").empty())
+            set("prompt_remap_four_color_projects", "1");
+
+        if (get("use_measured_swatch_calibration").empty())
+            set("use_measured_swatch_calibration", "0");
+
+        if (get("keep_painting").empty())
+            set("keep_painting", "1");
+        if (get("use_measured_swatch_calibration").empty())
+            set("use_measured_swatch_calibration", "0");
     }
     else {
 #ifdef _WIN32

@@ -233,6 +233,40 @@ int TriangleSelector::select_unsplit_triangle(const Vec3f &hit, int facet_idx) c
     return this->select_unsplit_triangle(hit, facet_idx, neighbors);
 }
 
+EnforcerBlockerType TriangleSelector::orig_facet_state(int orig_facet) const
+{
+    if (orig_facet < 0 || orig_facet >= m_orig_size_indices)
+        return EnforcerBlockerType::NONE;
+    if (m_triangles[orig_facet].is_split() || !m_triangles[orig_facet].valid())
+        return EnforcerBlockerType::NONE;
+    return m_triangles[orig_facet].get_state();
+}
+
+EnforcerBlockerType TriangleSelector::state_at_point(int orig_facet, const Vec3f &p) const
+{
+    if (orig_facet < 0 || orig_facet >= m_orig_size_indices)
+        return EnforcerBlockerType::NONE;
+    const int leaf = select_unsplit_triangle(p, orig_facet);
+    if (leaf >= 0 && leaf < int(m_triangles.size()) && !m_triangles[leaf].is_split())
+        return m_triangles[leaf].get_state();
+    if (!m_triangles[orig_facet].is_split())
+        return m_triangles[orig_facet].get_state();
+    return EnforcerBlockerType::NONE;
+}
+
+void TriangleSelector::split_dest_triangle(int facet_idx)
+{
+    if (facet_idx < 0 || facet_idx >= int(m_triangles.size()))
+        return;
+    if (!m_triangles[facet_idx].valid() || m_triangles[facet_idx].is_split())
+        return;
+    auto [neighbors, neighbors_propagated] = precompute_all_neighbors();
+    (void) neighbors_propagated;
+    if (facet_idx >= int(neighbors.size()))
+        return;
+    perform_split(facet_idx, neighbors[facet_idx], m_triangles[facet_idx].get_state());
+}
+
 void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&cursor, EnforcerBlockerType new_state, const Transform3d& trafo_no_translate, bool triangle_splitting, float highlight_by_angle_deg)
 {
     assert(facet_start < m_orig_size_indices);

@@ -1906,6 +1906,13 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def          = this->add("adaptive_bed_mesh", coBool);
+    def->label   = L("Adaptive bed mesh");
+    def->tooltip = L("On Klipper printers that support a probe-mesh toggle (e.g. WonderMaker ZR), emit G30 at print start to probe a "
+                     "fresh mesh over the print's footprint, or G31 to use the saved default mesh instead.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("extruder_colour", coStrings);
     def->label = L("Extruder Color");
     def->tooltip = L("Only used as a visual help on UI.");

@@ -291,6 +291,20 @@ set(lisbslic3r_sources
     MinimumSpanningTree.hpp
     MixedFilament.cpp
     MixedFilament.hpp
+    MixedFilamentConvert.cpp
+    MixedFilamentConvert.hpp
+    MixedFilamentSwatch.cpp
+    MixedFilamentSwatch.hpp
+    OfdCatalog.cpp
+    OfdCatalog.hpp
+    PicPrint.cpp
+    PicPrint.hpp
+    SlotRemap.cpp
+    SlotRemap.hpp
+    PaintReproject.cpp
+    PaintReproject.hpp
+    ColorSpace.cpp
+    ColorSpace.hpp
     filament_mixer.cpp
     filament_mixer.h
     filament_mixer_model.h

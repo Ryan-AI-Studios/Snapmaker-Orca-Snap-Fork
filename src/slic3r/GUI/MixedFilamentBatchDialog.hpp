@@ -84,6 +84,8 @@ private:
     void handle_batch_match_result(const BatchMatchResult& result);
 
     void update_mapping_legend();
+    void import_swatch_lut();
+    void export_swatch_lut();
 
     void display_warning(const wxString& msg);
     void set_error(const wxString& msg);
