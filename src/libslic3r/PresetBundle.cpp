@@ -3,6 +3,7 @@
 #include "PresetBundle.hpp"
 #include "FilamentColorLibrary.hpp"
 #include "PrintConfig.hpp"
+#include "ZrToolheadLoadout.hpp"
 #include "libslic3r.h"
 #include "Utils.hpp"
 #include "Model.hpp"
@@ -2075,12 +2076,13 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
 
 // Export selections (current print, current filaments, current printer) into config.ini
 //BBS: change directories by design
-void PresetBundle::export_selections(AppConfig &config)
+void PresetBundle::export_selections(AppConfig &config, const std::string &printer_name_override)
 {
 	assert(this->printers.get_edited_preset().printer_technology() != ptFFF || filament_presets.size() >= 1);
 	//assert(this->printers.get_edited_preset().printer_technology() != ptFFF || filament_presets.size() > 1 || filaments.get_selected_preset_name() == filament_presets.front());
     config.clear_section("presets");
-    auto printer_name = printers.get_selected_preset_name();
+    auto printer_name = printer_name_override.empty() ? printers.get_selected_preset_name()
+                                                      : printer_name_override;
     config.set("presets", PRESET_PRINTER_NAME, printer_name);
 
     config.clear_printer_settings(printer_name);
@@ -2140,6 +2142,15 @@ void PresetBundle::export_selections(AppConfig &config)
 
     auto flush_multi_opt = project_config.option<ConfigOptionFloat>("flush_multiplier");
     config.set("flush_multiplier", std::to_string(flush_multi_opt ? flush_multi_opt->getFloat() : 1.0f));
+
+    const Preset &edited_printer = printers.get_edited_preset();
+    if (const auto *pm = edited_printer.config.option<ConfigOptionString>("printer_model");
+        pm != nullptr && is_zr_ultra_s_printer_model(pm->value)) {
+        if (const auto *nd = edited_printer.config.option<ConfigOptionFloats>("nozzle_diameter");
+            nd != nullptr && nd->values.size() == kZrToolheadCount) {
+            config.set_printer_setting(printer_name, "nozzle_diameter", zr_loadout_format_nozzles(nd->values));
+        }
+    }
     // BBS
     //config.set("presets", "sla_print",    sla_prints.get_selected_preset_name());
     //config.set("presets", "sla_material", sla_materials.get_selected_preset_name());

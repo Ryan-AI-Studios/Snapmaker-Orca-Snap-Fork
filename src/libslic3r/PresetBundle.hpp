@@ -125,8 +125,9 @@ public:
     std::string get_stl_model_for_printer_model(std::string model_name);
     std::string get_hotend_model_for_printer_model(std::string model_name);
 
-    // Export selections (current print, current filaments, current printer) into config.ini
-    void            export_selections(AppConfig &config);
+    // Export selections (current print, current filaments, current printer) into config.ini.
+    // printer_name_override keys the printer-settings record when non-empty (ZR T1 install).
+    void            export_selections(AppConfig &config, const std::string &printer_name_override = std::string());
 
     // BBS
     void            set_num_filaments(unsigned int n, std::string new_col = "");

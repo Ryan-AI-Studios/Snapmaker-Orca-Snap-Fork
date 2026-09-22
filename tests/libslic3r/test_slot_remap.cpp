@@ -191,8 +191,11 @@ TEST_CASE("should_prompt_remap_four_color_project gates", "[SlotRemap]")
 
     SlotRemapPromptInput native = base;
     native.source_printer_model = "WonderMaker ZR Ultra S";
-    native.source_colours       = native.dest_colours;
     CHECK_FALSE(should_prompt_remap_four_color_project(native));
+
+    SlotRemapPromptInput native_out = native;
+    native_out.used_ids             = {1, 5};
+    CHECK(should_prompt_remap_four_color_project(native_out));
 
     SlotRemapPromptInput silence = base;
     silence.silence              = true;
