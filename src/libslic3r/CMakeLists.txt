@@ -301,6 +301,8 @@ set(lisbslic3r_sources
     PicPrint.hpp
     SlotRemap.cpp
     SlotRemap.hpp
+    ZrToolheadLoadout.cpp
+    ZrToolheadLoadout.hpp
     PaintReproject.cpp
     PaintReproject.hpp
     ColorSpace.cpp

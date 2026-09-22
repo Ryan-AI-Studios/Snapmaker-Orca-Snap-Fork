@@ -105,19 +105,6 @@ void remap_int_option(DynamicPrintConfig &cfg, const char *key, const SlotRemapM
     opt->value = static_cast<int>(dest);
 }
 
-bool colours_equal(
-    const std::vector<std::string> &a,
-    const std::vector<std::string> &b)
-{
-    if (a.size() != b.size())
-        return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (normalize_hex(a[i]) != normalize_hex(b[i]))
-            return false;
-    }
-    return true;
-}
-
 } // namespace
 
 unsigned int slot_remap_lookup(const SlotRemapMap &map, unsigned int src_1based)
@@ -321,11 +308,7 @@ bool should_prompt_remap_four_color_project(const SlotRemapPromptInput &in)
     }
 
     const bool native_zr = in.source_printer_model == "WonderMaker ZR Ultra S";
-    const bool colors_match = in.dest_colours.empty()
-        ? native_zr
-        : colours_equal(in.source_colours, in.dest_colours);
-
-    if (native_zr && ids_in_range && colors_match)
+    if (native_zr && ids_in_range)
         return false;
 
     return true;

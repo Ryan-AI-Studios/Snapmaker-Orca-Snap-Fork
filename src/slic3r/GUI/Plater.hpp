@@ -28,6 +28,7 @@
 #include "Jobs/SendJob.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintBase.hpp"
+#include "libslic3r/SlotRemap.hpp"
 
 #include "libslic3r/calib.hpp"
 #include "libslic3r/CutUtils.hpp"
@@ -997,7 +998,7 @@ public:
     bool is_loading_project() const { return m_loading_project; }
 
     enum class ConvertPaintedResult { Skipped, Disabled, Ineligible, Kept, Converted };
-    enum class RemapFourColorResult { Skipped, Disabled, Ineligible, Cancelled, Applied };
+    enum class RemapFourColorResult { Skipped, Disabled, Ineligible, Cancelled, Applied, IdentityApplied };
 
     // Consent-first convert of >4 painted colours to mixes. model_override is
     // the incoming 3MF model for T2 (geometry-only) before it is merged.
@@ -1016,12 +1017,14 @@ public:
     RemapFourColorResult maybe_prompt_remap_four_color_project(
         bool         restore_or_silence,
         bool         adopt_zr_ultra_s,
-        Model       *model_override = nullptr);
+        Model       *model_override = nullptr,
+        SlotRemapMap *deferred_remap = nullptr);
 
-    void maybe_prompt_convert_then_remap(
+    RemapFourColorResult maybe_prompt_convert_then_remap(
         bool         restore_or_silence,
         bool         adopt_zr_ultra_s,
-        Model       *model_override = nullptr);
+        Model       *model_override = nullptr,
+        SlotRemapMap *deferred_remap = nullptr);
 
     void picprint_on_selected();
     void ofd_open_catalog();
@@ -1042,6 +1045,8 @@ private:
     bool m_exported_file { false };
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
+    // Pre-open ZR Ultra S preset name so T1 dest lookup is not 0.4-first after load_files.
+    std::string m_zr_loadout_preset_hint;
     bool m_convert_painted_in_progress { false };
     bool m_remap_four_color_in_progress { false };
     std::string m_preview_only_filename;
