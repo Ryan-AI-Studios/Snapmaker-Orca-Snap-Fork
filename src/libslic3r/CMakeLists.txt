@@ -324,6 +324,8 @@ set(lisbslic3r_sources
     MutablePolygon.cpp
     MutablePolygon.hpp
     MutablePriorityQueue.hpp
+    NearbyDiscovery.cpp
+    NearbyDiscovery.hpp
     NormalUtils.cpp
     NormalUtils.hpp
     NSVGUtils.cpp
