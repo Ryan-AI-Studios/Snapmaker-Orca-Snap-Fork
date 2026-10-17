@@ -190,6 +190,14 @@ TEST_CASE("ZR loadout parse hex accepts hash and bare RRGGBB", "[ZrLoadout]")
     CHECK(r == 0xFF);
     CHECK(g == 0x00);
     CHECK(b == 0xAA);
+    REQUIRE(zr_loadout_parse_hex("#FF0000FF", r, g, b));
+    CHECK(r == 0xFF);
+    CHECK(g == 0x00);
+    CHECK(b == 0x00);
+    REQUIRE(zr_loadout_parse_hex("#00FF00|#0000FF", r, g, b));
+    CHECK(r == 0x00);
+    CHECK(g == 0xFF);
+    CHECK(b == 0x00);
     CHECK_FALSE(zr_loadout_parse_hex("xyz", r, g, b));
     CHECK_FALSE(zr_loadout_parse_hex("", r, g, b));
 }

@@ -283,9 +283,14 @@ bool zr_loadout_parse_hex(const std::string &raw, unsigned char &r, unsigned cha
         if (!std::isspace(c))
             s.push_back(static_cast<char>(c));
     }
+    const auto pipe = s.find('|');
+    if (pipe != std::string::npos)
+        s.resize(pipe);
     if (!s.empty() && s.front() == '#')
         s.erase(s.begin());
-    if (s.size() == 3)
+    if (s.size() >= 8)
+        s.resize(6);
+    else if (s.size() == 3)
         s = {s[0], s[0], s[1], s[1], s[2], s[2]};
     if (s.size() != 6)
         return false;

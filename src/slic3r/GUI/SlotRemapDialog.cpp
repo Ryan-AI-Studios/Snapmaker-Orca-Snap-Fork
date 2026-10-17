@@ -18,15 +18,14 @@ namespace {
 
 wxPanel *make_colour_chip(wxWindow *parent, const std::string &hex)
 {
-    auto *chip = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(18, 18));
-    chip->SetMinSize(wxSize(18, 18));
+    auto *chip = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(24, 24), wxBORDER_SIMPLE);
+    chip->SetMinSize(wxSize(24, 24));
     unsigned char r = 0, g = 0, b = 0;
-    if (zr_loadout_parse_hex(hex, r, g, b)) {
+    if (zr_loadout_parse_hex(hex, r, g, b))
         chip->SetBackgroundColour(wxColour(r, g, b));
-        chip->Show();
-    } else {
-        chip->Hide();
-    }
+    else
+        chip->SetBackgroundColour(parent->GetBackgroundColour());
+    chip->Show();
     return chip;
 }
 
@@ -35,13 +34,12 @@ void apply_chip_hex(wxPanel *chip, const std::string &hex)
     if (chip == nullptr)
         return;
     unsigned char r = 0, g = 0, b = 0;
-    if (zr_loadout_parse_hex(hex, r, g, b)) {
+    if (zr_loadout_parse_hex(hex, r, g, b))
         chip->SetBackgroundColour(wxColour(r, g, b));
-        chip->Show();
-        chip->Refresh();
-    } else {
-        chip->Hide();
-    }
+    else
+        chip->SetBackgroundColour(chip->GetParent() ? chip->GetParent()->GetBackgroundColour() : *wxWHITE);
+    chip->Show();
+    chip->Refresh();
 }
 
 wxString dest_label(
