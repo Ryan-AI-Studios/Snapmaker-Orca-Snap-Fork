@@ -8,6 +8,7 @@
 #include "nlohmann/json.hpp"
 #include "slic3r/GUI/Tab.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/NearbyDiscovery.hpp"
 #include "libslic3r/SSWCPProtocol.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "slic3r/Utils/SnapLogClient.hpp"
@@ -1849,12 +1850,13 @@ void SSWCP_MachineFind_Instance::set_stop(bool stop)
 // Get machine discovery support info
 void SSWCP_MachineFind_Instance::sw_GetMachineFindSupportInfo()
 {
-    // 2.0.0 only mdns - snapmaker
+    // 2.0.0 only mdns - snapmaker, moonraker
     json protocols = json::array();
     protocols.push_back("mdns");
 
     json mdns_service_names = json::array();
     mdns_service_names.push_back("snapmaker");
+    mdns_service_names.push_back("moonraker");
 
     json res;
     res["protocols"] = protocols;
@@ -1884,16 +1886,18 @@ void SSWCP_MachineFind_Instance::sw_WakeupFind()
         } catch (...) {
         }
 
-        // the target service queries once every 2 seconds
-        try {
-            auto kick = Bonjour("snapmaker")
-                            .set_retries(1)
-                            .set_timeout(2)
-                            .on_reply([](BonjourReply&&){})
-                            .on_complete([](){})
-                            .lookup();
-            (void)kick;
-        } catch (...) {
+        // the target services query once every 2 seconds
+        for (const char *service : {"snapmaker", "moonraker"}) {
+            try {
+                auto kick = Bonjour(service)
+                                .set_retries(1)
+                                .set_timeout(2)
+                                .on_reply([](BonjourReply&&){})
+                                .on_complete([](){})
+                                .lookup();
+                (void)kick;
+            } catch (...) {
+            }
         }
 
         // query in thread
@@ -1929,17 +1933,30 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
 
         for (size_t i = 0; i < protocols.size(); ++i) {
             if (protocols[i] == "mdns") {
-                std::vector<std::string> mdns_service_names;
-
-                mdns_service_names.push_back("snapmaker");
+                // One engine per advertised mDNS service type. Each engine owns its
+                // TXT allow-list and identity key: a single list shared across the
+                // loop would be moved-from after the first engine and would silently
+                // strip every key the second one advertises.
+                struct MdnsEngine {
+                    std::string      service_name;
+                    Bonjour::TxtKeys txt_keys;
+                    NearbyRowPolicy  policy;
+                };
+                // `snapmaker` keeps its policy off so its rows stay exactly as the
+                // firmware describes them. `moonraker` advertises a minimal TXT set
+                // and no model label, so its rows supply both.
+                const std::vector<MdnsEngine> mdns_engines = {
+                    {"snapmaker", {"sn", "version", "machine_type", "link_mode", "userid", "device_name", "ip", "region"},
+                     {"sn", false, ""}},
+                    {"moonraker", {"uuid", "version", "https_port", "route_prefix"},
+                     {"uuid", true, "WonderMaker ZR Ultra S"}},
+                };
 
                 m_engines.clear();
-                for (size_t i = 0; i < mdns_service_names.size(); ++i) {
+                m_engines.reserve(mdns_engines.size());
+                for (size_t i = 0; i < mdns_engines.size(); ++i) {
                     m_engines.push_back(nullptr);
                 }
-
-                Bonjour::TxtKeys txt_keys   = {"sn", "version", "machine_type", "link_mode", "userid", "device_name", "ip", "region"};
-                std::string      unique_key = "sn";
 
                 for (size_t i = 0; i < m_engines.size(); ++i) {
                     auto self = std::dynamic_pointer_cast<SSWCP_MachineFind_Instance>(shared_from_this());
@@ -1947,11 +1964,12 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                         continue;
                     }
                     std::weak_ptr<SSWCP_MachineFind_Instance> weak_self(self);
-                    m_engines[i] = Bonjour(mdns_service_names[i])
-                                     .set_txt_keys(std::move(txt_keys))
+                    const NearbyRowPolicy policy = mdns_engines[i].policy;
+                    m_engines[i] = Bonjour(mdns_engines[i].service_name)
+                                     .set_txt_keys(mdns_engines[i].txt_keys)
                                      .set_retries(3)
                                      .set_timeout(last_time >= 0.0 ? last_time/1000 : 20)
-                                     .on_reply([weak_self, unique_key](BonjourReply&& reply) {
+                                     .on_reply([weak_self, policy](BonjourReply&& reply) {
                                          // Check if application is still alive before processing
                                          if (!GUI_App::m_app_alive.load()) {
                                              return;
@@ -1967,92 +1985,52 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                                              return;
                                          }
 
-                                         json machine_data;
-
-                                         std::string hostname = reply.hostname;
-                                         size_t      pos      = hostname.find(".local");
-                                         if (pos != std::string::npos) {
-                                             hostname = hostname.substr(0, pos);
-                                         }
-
-                                         machine_data["name"] = hostname != "" ? hostname : reply.service_name;
-                                         // machine_data["hostname"] = reply.hostname;
-
                                          if (!reply.ip.is_v4()) {
                                              return;
                                          }
 
-                                         machine_data["ip"]       = reply.ip.to_string();
-                                         machine_data["port"]     = reply.port;
-                                         if (reply.txt_data.count("protocol")) {
-                                             machine_data["protocol"] = reply.txt_data["protocol"];
-                                         }
-                                         if (reply.txt_data.count("version")) {
-                                             machine_data["pro_version"] = reply.txt_data["version"];
-                                         }
-                                         if (reply.txt_data.count(unique_key)) {
-                                             machine_data["unique_key"]   = unique_key;
-                                             machine_data["unique_value"] = reply.txt_data[unique_key];
-                                             machine_data[unique_key]     = machine_data["unique_value"];
-                                         }
-                                         if (reply.txt_data.count("link_mode")) {
-                                             machine_data["link_mode"] = reply.txt_data["link_mode"];
-                                         }
-                                         if (reply.txt_data.count("userid")) {
-                                             machine_data["userid"] = reply.txt_data["userid"];
-                                         }
-                                         if (reply.txt_data.count("device_name")) {
-                                             machine_data["device_name"] = reply.txt_data["device_name"];
-                                         }
-                                       
-                                         if (reply.txt_data.count("machine_type")) {
-                                             std::string machine_type      = reply.txt_data["machine_type"];
-                                             machine_data["machine_type"] = machine_type;
+                                         NearbyReply decoded;
+                                         decoded.address       = reply.ip.to_string();
+                                         decoded.port          = reply.port;
+                                         decoded.instance_name = reply.service_name;
+                                         decoded.hostname      = reply.hostname;
+                                         decoded.txt.insert(reply.txt_data.begin(), reply.txt_data.end());
 
-                                             auto machine_ip_type = MachineIPType::getInstance();
-                                             if (machine_ip_type) {
-                                                 machine_ip_type->add_instance(reply.ip.to_string(), machine_type);
+                                         // Each engine replies on its own look-up thread while the rest
+                                         // of this instance runs on the UI thread. Hand the reply over
+                                         // so every read and write of the shared response JSON -
+                                         // including the copy `send_to_js` takes - stays on one thread.
+                                         wxGetApp().CallAfter([weak_self, policy, decoded]() {
+                                             if (!GUI_App::m_app_alive.load()) {
+                                                 return;
                                              }
 
-                                             size_t      vendor_pos    = machine_type.find_first_of(" ");
-                                             if (vendor_pos != std::string::npos) {
-                                                 std::string vendor = machine_type.substr(0, vendor_pos);
-                                                 // Check application is still alive before accessing wxGetApp()
-                                                 if (GUI_App::m_app_alive.load()) {
-                                                     {
-                                                         std::string machine_cover = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port()) + "/profiles/" +
-                                                                                     vendor + "/" + machine_type + "_cover.png";
-                                                         machine_data["cover"] = machine_cover;
-                                                     } 
+                                             auto self = weak_self.lock();
+                                             if (!self || self->is_stop()) {
+                                                 return;
+                                             }
+
+                                             const std::string cover_base_url =
+                                                 LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port());
+                                             const NearbyRow row = nearby_row_from_reply(decoded, policy, cover_base_url);
+
+                                             if (row.derived_identity) {
+                                                 // The list key is derived, not a serial the device advertised.
+                                                 BOOST_LOG_TRIVIAL(warning) << "[Machine Find] device advertises no serial; listing under the derived identity: " << row.list_key;
+                                             }
+
+                                             if (auto machine_type = row.data.find("machine_type");
+                                                 machine_type != row.data.end() && machine_type->is_string()) {
+                                                 auto machine_ip_type = MachineIPType::getInstance();
+                                                 if (machine_ip_type) {
+                                                     machine_ip_type->add_instance(decoded.address, machine_type->get<std::string>());
                                                  }
                                              }
-                                         }
 
-                                         if (reply.txt_data.count("ip") && machine_data["ip"] == "") {
-                                             BOOST_LOG_TRIVIAL(warning) << "[Machine Find] Can't find the endpoint's ip, use the txtData: "
-                                                                        << reply.txt_data["ip"];
-                                             machine_data["ip"] = reply.txt_data["ip"];
-                                         }
-
-                                         machine_data["txt_ip"] = reply.txt_data["ip"];
-
-                                         if (reply.txt_data.count("region")) {
-                                             machine_data["region"] = reply.txt_data["region"];
-                                         }
-
-                                         // Final check before adding to list
-                                         if (!GUI_App::m_app_alive.load() || !self || self->is_stop()) {
-                                             return;
-                                         }
-
-                                         json machine_object;
-                                         if (machine_data.count("unique_value")) {
+                                             json machine_object;
+                                             machine_object[row.list_key] = row.data;
                                              self->add_machine_to_list(machine_object);
-                                             machine_object[reply.txt_data[unique_key]] = machine_data;
-                                         } else {
-                                             machine_object[reply.ip.to_string()] = machine_data;
-                                         }
-                                         self->add_machine_to_list(machine_object);
+                                         });
 
                                      })
                                      .on_complete([weak_self]() {
@@ -2107,7 +2085,13 @@ void SSWCP_MachineFind_Instance::add_machine_to_list(const json& machine_info)
     try {
         BOOST_LOG_TRIVIAL(info) << "check the machine list on json: " << machine_info.dump();
         for (const auto& [key, value] : machine_info.items()) {
-            std::string sn        = value["sn"].get<std::string>();
+            // Never read a missing key off a const object: `operator[]` asserts in
+            // debug and throws std::out_of_range in release, and the catch below
+            // would then drop the reply for this device and every other engine.
+            std::string sn = key;
+            if (const auto sn_it = value.find("sn"); sn_it != value.end() && sn_it->is_string()) {
+                sn = sn_it->get<std::string>();
+            }
             bool        need_send = false;
             m_machine_list_mtx.lock();
             if (!m_machine_list.count(sn)) {
@@ -2127,7 +2111,7 @@ void SSWCP_MachineFind_Instance::add_machine_to_list(const json& machine_info)
                 if (info.connected) {
                     m_res_data[key]["connected"] = true;
                 }
-                std::string ip = value["ip"].get<std::string>();
+                std::string ip = value.value("ip", std::string());
                 if (0) {
                     info.ip = ip;
                     wxGetApp().app_config->save_device_info(info);
