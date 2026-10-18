@@ -305,8 +305,10 @@ public:
 
 public:
     // Nearby Connect (track 0011): bind a remembered Moonraker row as the print
-    // host without entering the MQTT chain.
-    void bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target);
+    // host without entering the MQTT chain. `identity` is the row's `sn` from
+    // the request (the registry key the device is remembered under), used to
+    // key the device record that My Devices reads.
+    void bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target, const std::string &identity);
 
     // True once this instance's Nearby bind attempt has produced its terminal
     // outcome (answered, committed, superseded or timed out). Guarantees exactly

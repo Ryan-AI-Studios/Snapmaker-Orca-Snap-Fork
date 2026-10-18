@@ -6852,9 +6852,12 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         // request can only match if the device was discovered over
         // `_moonraker._tcp` during this session, which only the Nearby list does.
         if (const auto target = Slic3r::nearby_moonraker_target_for(m_param_data)) {
+            // The matcher only returns a target when `sn` is a non-empty string,
+            // and `sn` is the identity the row was remembered under.
+            const std::string identity = m_param_data["sn"].get<std::string>();
             BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] binding create request for " << target->ip << ":"
                                      << target->port;
-            bind_nearby_moonraker(*target);   // no MqttClient, no dial to 1884
+            bind_nearby_moonraker(*target, identity);   // no MqttClient, no dial to 1884
             return;
         }
 
@@ -6996,7 +6999,8 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
 // Nearby Connect (track 0011): bind a remembered Moonraker row as the print host
 // with the owner-proven OctoPrint-compatible configuration, without creating an
 // MqttClient and without ever dialling port 1884.
-void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target)
+void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target,
+                                                     const std::string               &identity)
 {
     // Each bind attempt is a generation. A superseded attempt can neither commit
     // nor close a dialog, and it is answered at once instead of leaving its page
@@ -7028,7 +7032,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
     nearby_bind_owner = self_shared;
     std::weak_ptr<SSWCP_MqttAgent_Instance> weak_self = self_shared;
 
-    wxGetApp().CallAfter([weak_self, target, generation, origin_preset, origin_webview]() {
+    wxGetApp().CallAfter([weak_self, target, identity, generation, origin_preset, origin_webview]() {
         auto self = weak_self.lock();
         if (!self)
             return;
@@ -7116,7 +7120,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         if (self->m_work_thread.joinable())
             self->m_work_thread.detach();
         self->m_work_thread = std::thread(
-            [weak_self, host, target, generation, origin_preset, origin_webview, dialog_for_close]() {
+            [weak_self, host, target, identity, generation, origin_preset, origin_webview, dialog_for_close]() {
                 wxString   msg;
                 const bool res = host->test(msg);
                 // A worker that finishes after the application has gone must not
@@ -7124,7 +7128,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                 // file uses (e.g. the mDNS reply callbacks).
                 if (!GUI_App::m_app_alive.load())
                     return;
-                wxGetApp().CallAfter([weak_self, host, target, res, msg, generation, origin_preset,
+                wxGetApp().CallAfter([weak_self, host, target, identity, res, msg, generation, origin_preset,
                                       origin_webview, dialog_for_close]() {
                     auto self = weak_self.lock();
                     if (!self)
@@ -7203,6 +7207,47 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
 
                     // Finish the UI the way the native connect epilogues do.
                     //
+                    // First the device record: My Devices, the device cards and
+                    // the printer view are all built from AppConfig device
+                    // entries, so without this the printer is bound but invisible
+                    // (owner finding, 2026-10-18). This mirrors the minimal write
+                    // the MQTT epilogue performs (SSWCP.cpp:7773-7808) - Flutter
+                    // enriches model/nozzles later through sw_UpdateDeviceInfo.
+                    {
+                        DeviceInfo info;
+                        const bool known = wxGetApp().app_config->get_device_info(identity, info);
+                        if (!known) {
+                            info.dev_id   = identity;
+                            info.protocol = 0;
+                            info.port     = 0;
+                        }
+                        info.ip        = target.ip;
+                        info.dev_id    = identity;
+                        info.sn        = identity;
+                        info.dev_name  = target.name.empty() ? identity : target.name;
+                        info.connected = true;
+                        info.link_mode = "lan";
+                        // The record carries the transport the page knows how to
+                        // render for this printer; the print host itself is the
+                        // REST/OctoPrint binding made above.
+                        info.protocol = int(PrintHostType::htMoonRaker_mqtt);
+                        info.port     = target.port;
+                        wxGetApp().app_config->save_device_info(info);
+                    }
+
+                    // Then let the running page see it: the device-card list is
+                    // fed by `local_devices_arrived` plus the WCP card notify,
+                    // exactly as the MQTT epilogue does (SSWCP.cpp:7810-7814).
+                    {
+                        const json devices = wxGetApp().app_config->get_devices();
+                        json       param;
+                        param["command"]    = "local_devices_arrived";
+                        param["sequece_id"] = "10001";
+                        param["data"]       = devices;
+                        wxGetApp().run_script(wxString::Format("window.postMessage(%s)", param.dump()));
+                        wxGetApp().device_card_notify(devices);
+                    }
+
                     // The page's own request is deliberately never answered with a
                     // WCP success (that would make it call sw_mqtt_connect, whose
                     // engine we never created), so the Add-Device route is left
@@ -7220,7 +7265,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     wxGetApp().mainframe->load_printer_url(wxGetApp().get_international_url(printer_url));
 
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
-                                             << ")";
+                                             << ") as device " << identity;
                     self->finish_job();
                 });
             });
