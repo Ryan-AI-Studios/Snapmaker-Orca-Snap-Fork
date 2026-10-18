@@ -1952,8 +1952,10 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                 const std::vector<MdnsEngine> mdns_engines = {
                     {"snapmaker", {"sn", "version", "machine_type", "link_mode", "userid", "device_name", "ip", "region"},
                      {"sn", false, ""}},
+                    // Moonraker's flag names the row after the model the engine
+                    // supplies instead of the responder hostname (track 0012).
                     {"moonraker", {"uuid", "version", "https_port", "route_prefix"},
-                     {"uuid", true, "WonderMaker ZR Ultra S"}},
+                     {"uuid", true, "WonderMaker ZR Ultra S", true}},
                 };
 
                 m_engines.clear();

@@ -39,6 +39,12 @@ struct NearbyRowPolicy
 
     /// Model label to use when the service advertises no `machine_type`.
     std::string default_machine_type;
+
+    /// Name the row after `machine_type` instead of the responder's hostname.
+    /// `_moonraker._tcp` advertises no human label and its SRV target is the
+    /// printer's own hostname, so the model reads better in the list;
+    /// `_snapmaker._tcp` must keep the label the firmware advertises.
+    bool name_from_machine_type {false};
 };
 
 /// One row of the Devices -> Nearby list.

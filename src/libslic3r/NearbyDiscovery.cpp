@@ -59,14 +59,22 @@ NearbyRow nearby_row_from_reply(const NearbyReply &reply, const NearbyRowPolicy 
     row.list_key         = nearby_identity(reply, policy.unique_key);
     row.derived_identity = txt_or(reply, policy.unique_key.c_str(), std::string()).empty();
 
+    // The model the engine knows for this service, if any. Computed here because
+    // it can also stand in for the display name (see below).
+    const std::string machine_type = txt_or(reply, "machine_type", policy.default_machine_type);
+
     // Display name. The SRV target wins over the instance name so that every
     // `_snapmaker._tcp` row keeps the label it has today; the instance name and
-    // then the IP are fallbacks for services whose target is missing.
+    // then the IP are fallbacks for services whose target is missing. An engine
+    // whose service advertises no human label (Moonraker: the SRV target is the
+    // printer's hostname) opts in to being named after the model instead.
     std::string name = host_without_local(reply.hostname);
     if (name.empty())
         name = reply.instance_name;
     if (name.empty())
         name = reply.address;
+    if (policy.name_from_machine_type && !machine_type.empty())
+        name = machine_type;
 
     nlohmann::json data;
     data["name"] = name;
@@ -113,8 +121,8 @@ NearbyRow nearby_row_from_reply(const NearbyReply &reply, const NearbyRowPolicy 
 
     // Services such as Moonraker advertise no model label; the engine supplies
     // one so the row is identifiable and the cover convention has something to
-    // work with.
-    const std::string machine_type = txt_or(reply, "machine_type", policy.default_machine_type);
+    // work with. (`machine_type` itself was resolved above, where it may also
+    // have supplied the display name.)
     if (!machine_type.empty()) {
         data["machine_type"] = machine_type;
         if (const std::string cover = cover_url(cover_base_url, machine_type); !cover.empty())
