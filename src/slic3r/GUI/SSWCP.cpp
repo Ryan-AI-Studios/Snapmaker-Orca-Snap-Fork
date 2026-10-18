@@ -7232,34 +7232,22 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
                     wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
 
-                    // Finish the UI the way the native connect epilogues do.
+                    // Finish the UI the way the native connect epilogues do: hand
+                    // the printer view back to the app's own loader, which loads
+                    // the bound print host (Fluidd) - exactly what
+                    // `Plater.cpp:3241-3263` does for this configuration. Loading
+                    // the Flutter printer page here instead (as an earlier cut
+                    // did) left the Device tab on the Flutter page, which shows
+                    // "can't connect" with no MQTT session: the owner saw that
+                    // as a mostly-white screen on 2026-10-18 10:45:38, right
+                    // before the app's own load of Fluidd succeeded.
                     //
-                    // NOTE (2026-10-18): a device record (DeviceInfo) is
-                    // deliberately NOT written here, and the page is not poked
-                    // with `local_devices_arrived`/card notifications. Doing so
-                    // left the owner's app config unparseable on the next start
-                    // ("Unknown exception", settings recreated): with the record
-                    // present the 08:33 session corrupted it, and in the 07:42
-                    // session - identical except for the absent record - the
-                    // config survived. Device-record/card state needs the page's
-                    // own flow to drive it (separate track); this bind only
-                    // configures the printer.
-                    //
-                    // The page's own request is deliberately never answered with a
-                    // WCP success (that would make it call sw_mqtt_connect, whose
-                    // engine we never created), so the Add-Device route is left
-                    // waiting. Returning to the printer view - exactly what
-                    // SSWCP.cpp:7809-7823 does after a real connect - replaces
-                    // that route and reloads the page, which also discards the
-                    // pending request. A native WebDeviceDialog, when one exists
-                    // (this build does not create one for Nearby), is closed too.
+                    // A native WebDeviceDialog, when one exists (this build does
+                    // not create one for Nearby), is closed too.
                     if (auto *dialog = dialog_for_close())
                         dialog->EndModal(1);
 
-                    wxString printer_url = wxString::FromUTF8(
-                        LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
-                        "/web/flutter_web/index.html?path=2");
-                    wxGetApp().mainframe->load_printer_url(wxGetApp().get_international_url(printer_url));
+                    wxGetApp().mainframe->load_printer_url();
 
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
                                              << ") as device " << identity;
