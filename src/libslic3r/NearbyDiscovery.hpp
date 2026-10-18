@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace Slic3r {
@@ -74,6 +75,32 @@ std::string nearby_choose_address(const std::string &a_record, const std::string
 /// the cover URL. Pure string work: no wxWidgets, no I/O.
 NearbyRow nearby_row_from_reply(const NearbyReply &reply, const NearbyRowPolicy &policy,
                                 const std::string &cover_base_url);
+
+/// A discovered `_moonraker._tcp` device that Nearby can bind as a print host.
+struct NearbyMoonrakerTarget
+{
+    std::string ip;       ///< routable IPv4 the row was listed with
+    uint16_t    port {0}; ///< SRV port (kept separate: print_host stays host-only)
+    std::string name;     ///< display name of the row
+};
+
+/// Remember a discovered Moonraker device. `uuid` is the identity the page
+/// echoes back as `sn` (the advertised `uuid` TXT value; the mapper's derived
+/// identity is used when the service advertises none). Overwrite by uuid;
+/// never cleared; mutex-guarded.
+void nearby_remember_moonraker(const std::string &uuid, const NearbyMoonrakerTarget &target);
+
+/// Match a `sw_create_mqtt_client` request against the remembered devices.
+/// Returns a target only when `link_mode == "lan"`, `sn` is a remembered uuid
+/// and the host parsed from `server_address` equals that row's ip. Every key is
+/// type-checked: a wrong/missing type yields nullopt and never throws.
+std::optional<NearbyMoonrakerTarget> nearby_moonraker_target_for(const nlohmann::json &create_params);
+
+/// Host-only print_host for the target (matches the owner-proven preset).
+std::string nearby_moonraker_print_host(const NearbyMoonrakerTarget &target);
+
+/// SRV port of the target, kept separate from print_host.
+uint16_t nearby_moonraker_port(const NearbyMoonrakerTarget &target);
 
 } // namespace Slic3r
 

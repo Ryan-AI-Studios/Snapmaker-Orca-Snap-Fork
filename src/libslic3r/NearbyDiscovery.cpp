@@ -1,6 +1,7 @@
 #include "libslic3r/NearbyDiscovery.hpp"
 
 #include <cstddef>
+#include <mutex>
 #include <utility>
 
 namespace Slic3r {
@@ -178,6 +179,163 @@ std::string nearby_choose_address(const std::string &a_record, const std::string
     if (nearby_is_usable_lan_ipv4(packet_source))
         return packet_source;
     return a_record.empty() ? packet_source : a_record;
+}
+
+namespace {
+
+/// Registry of the Moonraker rows remembered this session, keyed by the
+/// identity the page echoes back as `sn`. Function-local statics give
+/// thread-safe initialisation; access is always taken through the accessors.
+std::map<std::string, NearbyMoonrakerTarget> &moonraker_registry()
+{
+    static std::map<std::string, NearbyMoonrakerTarget> registry;
+    return registry;
+}
+
+std::mutex &moonraker_registry_mutex()
+{
+    static std::mutex mtx;
+    return mtx;
+}
+
+/// True for a syntactically valid `scheme` token (RFC 3986): ALPHA followed by
+/// ALPHA / DIGIT / "+" / "-" / ".".
+bool is_scheme_token(const std::string &scheme)
+{
+    if (scheme.empty())
+        return false;
+    const char first = scheme.front();
+    if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')))
+        return false;
+    for (const char c : scheme) {
+        const bool alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!alnum && c != '+' && c != '-' && c != '.')
+            return false;
+    }
+    return true;
+}
+
+/// True for a decimal port in 1..65535.
+bool is_valid_port(const std::string &port)
+{
+    if (port.empty() || port.size() > 5)
+        return false;
+    unsigned value = 0;
+    for (const char c : port) {
+        if (c < '0' || c > '9')
+            return false;
+        value = value * 10 + static_cast<unsigned>(c - '0');
+    }
+    return value >= 1 && value <= 65535;
+}
+
+/// True when the text after a host is either empty or a `:`-introduced valid port.
+bool port_suffix_ok(const std::string &suffix)
+{
+    return suffix.empty() || (suffix.size() > 1 && suffix[0] == ':' && is_valid_port(suffix.substr(1)));
+}
+
+/// Host part of an MQTT `server_address`, or empty when the address is not a
+/// well-formed `[scheme://]host[:port]` authority.
+///
+/// A malformed address (empty or non-token scheme, empty or out-of-range port,
+/// a path/query after the authority, an unbalanced bracket) yields an empty host
+/// so a malformed create request can never match a remembered row. Plain string
+/// work: never a throw.
+std::string server_address_host(const std::string &server_address)
+{
+    std::string rest = server_address;
+
+    // Anything before "://" is a scheme (`mqtt://`, `mqtts://`, other), and it
+    // has to be a real scheme token - "://host" is garbage, not a scheme.
+    if (const size_t scheme_pos = rest.find("://"); scheme_pos != std::string::npos) {
+        if (!is_scheme_token(rest.substr(0, scheme_pos)))
+            return std::string();
+        rest = rest.substr(scheme_pos + 3);
+    }
+
+    if (rest.empty())
+        return std::string();
+
+    if (rest.front() == '[') {
+        const size_t close = rest.find(']');
+        if (close == std::string::npos || !port_suffix_ok(rest.substr(close + 1)))
+            return std::string();
+        const std::string bracketed = rest.substr(1, close - 1);
+        // Only an IPv6-style literal belongs in brackets; Nearby only ever
+        // remembers IPv4 targets, so anything else cannot be a match anyway.
+        if (bracketed.find(':') == std::string::npos)
+            return std::string();
+        return bracketed;
+    }
+
+    if (const size_t colon = rest.find(':'); colon != std::string::npos) {
+        if (!port_suffix_ok(rest.substr(colon)))
+            return std::string();
+        rest = rest.substr(0, colon);
+    }
+
+    // A path, query or fragment where the host should be means this is not the
+    // `host[:port]` authority the create request is documented to carry.
+    if (rest.empty() || rest.find_first_of("/?#") != std::string::npos)
+        return std::string();
+
+    return rest;
+}
+
+} // namespace
+
+void nearby_remember_moonraker(const std::string &uuid, const NearbyMoonrakerTarget &target)
+{
+    if (uuid.empty())
+        return;
+
+    std::lock_guard<std::mutex> lock(moonraker_registry_mutex());
+    moonraker_registry()[uuid] = target;
+}
+
+std::optional<NearbyMoonrakerTarget> nearby_moonraker_target_for(const nlohmann::json &create_params)
+{
+    if (!create_params.is_object())
+        return std::nullopt;
+
+    const auto server_it = create_params.find("server_address");
+    if (server_it == create_params.end() || !server_it->is_string())
+        return std::nullopt;
+
+    const auto sn_it = create_params.find("sn");
+    if (sn_it == create_params.end() || !sn_it->is_string())
+        return std::nullopt;
+    const std::string sn = sn_it->get<std::string>();
+    if (sn.empty())
+        return std::nullopt;
+
+    const auto link_it = create_params.find("link_mode");
+    if (link_it == create_params.end() || !link_it->is_string())
+        return std::nullopt;
+    if (link_it->get<std::string>() != "lan")
+        return std::nullopt;
+
+    const std::string host = server_address_host(server_it->get<std::string>());
+    if (host.empty())
+        return std::nullopt;
+
+    std::lock_guard<std::mutex> lock(moonraker_registry_mutex());
+    const auto it = moonraker_registry().find(sn);
+    if (it == moonraker_registry().end() || it->second.ip != host)
+        return std::nullopt;
+
+    return it->second;
+}
+
+std::string nearby_moonraker_print_host(const NearbyMoonrakerTarget &target)
+{
+    return target.ip;
+}
+
+uint16_t nearby_moonraker_port(const NearbyMoonrakerTarget &target)
+{
+    return target.port;
 }
 
 } // namespace Slic3r

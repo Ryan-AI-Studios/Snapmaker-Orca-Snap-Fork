@@ -2,6 +2,7 @@
 #ifndef SSWCP_HPP
 #define SSWCP_HPP
 
+#include <atomic>
 #include <iostream>
 #include <mutex>
 #include <stack>
@@ -18,6 +19,7 @@
 #include "slic3r/Utils/PrintHost.hpp"
 #include "slic3r/Utils/MQTT.hpp"
 #include "libslic3r/SSWCPProtocol.hpp"
+#include "libslic3r/NearbyDiscovery.hpp"
 #include "WebSocketDebugServer.hpp"
 
 
@@ -302,6 +304,15 @@ public:
     static std::unordered_map<wxWebView*, std::string> m_connect_session_map;
 
 public:
+    // Nearby Connect (track 0011): bind a remembered Moonraker row as the print
+    // host without entering the MQTT chain.
+    void bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target);
+
+    // True once this instance's Nearby bind attempt has produced its terminal
+    // outcome (answered, committed, superseded or timed out). Guarantees exactly
+    // one terminal reply and at most one commit per request.
+    std::atomic<bool> m_nearby_bind_terminal{false};
+
     bool validate_id(const std::string& id);
     std::shared_ptr<MqttClient> get_current_engine() {
         m_engine_map_mtx.lock();
