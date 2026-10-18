@@ -22,11 +22,13 @@ std::vector<std::string> keys_of(const json &object)
 }
 
 /// `_snapmaker._tcp`: every key the row needs is advertised, so the mapper must
-/// not supply anything of its own.
-NearbyRowPolicy snapmaker_policy() { return {"sn", false, ""}; }
+/// not supply anything of its own. Naming is off, so rows keep the advertised
+/// label.
+NearbyRowPolicy snapmaker_policy() { return {"sn", false, "", false}; }
 
-/// `_moonraker._tcp`: minimal TXT set, no model label.
-NearbyRowPolicy moonraker_policy() { return {"uuid", true, "WonderMaker ZR Ultra S"}; }
+/// `_moonraker._tcp`: minimal TXT set, no model label, and the engine names the
+/// row after the model it supplies (the SRV target is only the hostname).
+NearbyRowPolicy moonraker_policy() { return {"uuid", true, "WonderMaker ZR Ultra S", true}; }
 
 /// A reply shaped like the ZR Ultra S' Moonraker advertisement: the systemd unit
 /// name capitalised as the instance, the host as the SRV target, HTTP port 7125,
@@ -84,7 +86,9 @@ TEST_CASE("Nearby maps a Moonraker advertisement into a listable row", "[NearbyM
     CHECK(row.data.at("unique_key") == "uuid");
     CHECK(row.data.at("unique_value") == "5f2b0f7c-1111-2222-3333-444455556666");
 
-    CHECK(row.data.at("name") == "TM-T1");
+    // The engine names this row after the model it supplies (the Moondraker SRV
+    // target is only the printer's hostname, "TM-T1").
+    CHECK(row.data.at("name") == "WonderMaker ZR Ultra S");
     CHECK(row.data.at("ip") == "10.0.0.186");
     CHECK(row.data.at("port") == 7125);
     CHECK(row.data.at("pro_version") == "1.4.0");
@@ -94,7 +98,7 @@ TEST_CASE("Nearby maps a Moonraker advertisement into a listable row", "[NearbyM
     // does not hide its own address behind an empty `txt_ip`.
     CHECK(row.data.at("txt_ip") == "10.0.0.186");
     CHECK(row.data.at("link_mode") == "lan");
-    CHECK(row.data.at("device_name") == "TM-T1");
+    CHECK(row.data.at("device_name") == "WonderMaker ZR Ultra S");
 
     // Moonraker advertises no model label: the engine supplies one for this
     // printer, and the cover convention is built from it.
@@ -139,13 +143,17 @@ TEST_CASE("Nearby display name falls back from the SRV host to the instance name
 {
     NearbyReply reply = moonraker_reply();
 
-    CHECK(nearby_row_from_reply(reply, moonraker_policy(), "").data.at("name") == "TM-T1");
+    // A policy that does not opt in to model naming keeps the hostname chain, so
+    // the fallbacks stay covered; the engine's own policy is exercised above.
+    const NearbyRowPolicy no_model_name{"uuid", true, "WonderMaker ZR Ultra S", false};
+
+    CHECK(nearby_row_from_reply(reply, no_model_name, "").data.at("name") == "TM-T1");
 
     reply.hostname.clear();
-    CHECK(nearby_row_from_reply(reply, moonraker_policy(), "").data.at("name") == "Moonraker @ TM-T1");
+    CHECK(nearby_row_from_reply(reply, no_model_name, "").data.at("name") == "Moonraker @ TM-T1");
 
     reply.instance_name.clear();
-    CHECK(nearby_row_from_reply(reply, moonraker_policy(), "").data.at("name") == "10.0.0.186");
+    CHECK(nearby_row_from_reply(reply, no_model_name, "").data.at("name") == "10.0.0.186");
 }
 
 TEST_CASE("Nearby prefers an advertised IP TXT key over the responder address", "[NearbyMoonraker]")
@@ -188,6 +196,10 @@ TEST_CASE("Nearby maps a populated Snapmaker advertisement exactly as the old in
     CHECK(row.data.at("unique_key") == "sn");
     CHECK(row.data.at("unique_value") == "U1ABCD1234");
     CHECK(row.data.at("name") == "snapmaker-u1-abcd");
+    // Track 0012: the Snapmaker engine does not opt in to model naming, so a
+    // reply that advertises a `machine_type` still keeps the advertised label.
+    CHECK(row.data.at("machine_type") == "Snapmaker U1");
+    CHECK(row.data.at("name") != row.data.at("machine_type"));
     CHECK(row.data.at("ip") == "192.168.1.20");
     CHECK(row.data.at("txt_ip") == "192.168.1.20");
     CHECK(row.data.at("port") == 8080);
