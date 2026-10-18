@@ -7234,47 +7234,17 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
 
                     // Finish the UI the way the native connect epilogues do.
                     //
-                    // First the device record: My Devices, the device cards and
-                    // the printer view are all built from AppConfig device
-                    // entries, so without this the printer is bound but invisible
-                    // (owner finding, 2026-10-18). This mirrors the minimal write
-                    // the MQTT epilogue performs (SSWCP.cpp:7773-7808) - Flutter
-                    // enriches model/nozzles later through sw_UpdateDeviceInfo.
-                    {
-                        DeviceInfo info;
-                        const bool known = wxGetApp().app_config->get_device_info(identity, info);
-                        if (!known) {
-                            info.dev_id   = identity;
-                            info.protocol = 0;
-                            info.port     = 0;
-                        }
-                        info.ip        = target.ip;
-                        info.dev_id    = identity;
-                        info.sn        = identity;
-                        info.dev_name  = target.name.empty() ? identity : target.name;
-                        info.connected = true;
-                        info.link_mode = "lan";
-                        // The record carries the transport the page knows how to
-                        // render for this printer; the print host itself is the
-                        // REST/OctoPrint binding made above.
-                        info.protocol = int(PrintHostType::htMoonRaker_mqtt);
-                        info.port     = target.port;
-                        wxGetApp().app_config->save_device_info(info);
-                    }
-
-                    // Then let the running page see it: the device-card list is
-                    // fed by `local_devices_arrived` plus the WCP card notify,
-                    // exactly as the MQTT epilogue does (SSWCP.cpp:7810-7814).
-                    {
-                        const json devices = wxGetApp().app_config->get_devices();
-                        json       param;
-                        param["command"]    = "local_devices_arrived";
-                        param["sequece_id"] = "10001";
-                        param["data"]       = devices;
-                        wxGetApp().run_script(wxString::Format("window.postMessage(%s)", param.dump()));
-                        wxGetApp().device_card_notify(devices);
-                    }
-
+                    // NOTE (2026-10-18): a device record (DeviceInfo) is
+                    // deliberately NOT written here, and the page is not poked
+                    // with `local_devices_arrived`/card notifications. Doing so
+                    // left the owner's app config unparseable on the next start
+                    // ("Unknown exception", settings recreated): with the record
+                    // present the 08:33 session corrupted it, and in the 07:42
+                    // session - identical except for the absent record - the
+                    // config survived. Device-record/card state needs the page's
+                    // own flow to drive it (separate track); this bind only
+                    // configures the printer.
+                    //
                     // The page's own request is deliberately never answered with a
                     // WCP success (that would make it call sw_mqtt_connect, whose
                     // engine we never created), so the Add-Device route is left
@@ -7294,6 +7264,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
                                              << ") as device " << identity;
                     {
+                        // Remember it so the page's retries cannot re-run the bind.
                         std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
                         nearby_bound.insert(identity);
                     }
