@@ -1951,9 +1951,9 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                 // and no model label, so its rows supply both.
                 const std::vector<MdnsEngine> mdns_engines = {
                     {"snapmaker", {"sn", "version", "machine_type", "link_mode", "userid", "device_name", "ip", "region"},
-                     {"sn", false, "", false}},
+                     {"sn", false, ""}},
                     {"moonraker", {"uuid", "version", "https_port", "route_prefix"},
-                     {"uuid", true, "WonderMaker ZR Ultra S", true}},
+                     {"uuid", true, "WonderMaker ZR Ultra S"}},
                 };
 
                 m_engines.clear();
