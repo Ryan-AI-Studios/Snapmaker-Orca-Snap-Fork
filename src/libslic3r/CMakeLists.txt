@@ -550,6 +550,24 @@ target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
 # Find the OCCT and related libraries
 set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
 find_package(OpenCASCADE REQUIRED)
+
+if (WIN32)
+    # OCCT's imported targets export wsock32.lib (Winsock 1.1). That library's
+    # setsockopt/getsockopt renumber IPPROTO_IP options, so ws2tcpip.h's
+    # IP_MULTICAST_IF (9) arrives as IP_DONTFRAGMENT (14): mDNS egress is silently
+    # lost while every call still reports success (Microsoft KB 257460).
+    # Link ws2_32 instead; OCCT's own DLLs keep their WSOCK32 import.
+    foreach(_occt_target TKernel TKShHealing)
+        if (TARGET ${_occt_target})
+            get_target_property(_occt_deps ${_occt_target} INTERFACE_LINK_LIBRARIES)
+            if (_occt_deps)
+                list(TRANSFORM _occt_deps REPLACE "^wsock32(\\.lib)?$" "ws2_32.lib")
+                set_target_properties(${_occt_target} PROPERTIES INTERFACE_LINK_LIBRARIES "${_occt_deps}")
+            endif()
+            unset(_occt_deps)
+        endif()
+    endforeach()
+endif()
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
 target_link_libraries(libslic3r PUBLIC nlohmann_json)
 

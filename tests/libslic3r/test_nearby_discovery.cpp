@@ -295,3 +295,37 @@ TEST_CASE("Nearby carries the optional protocol and version fields the row vocab
     CHECK_FALSE(bare_row.data.contains("protocol"));
     CHECK_FALSE(bare_row.data.contains("pro_version"));
 }
+
+// ---------------------------------------------------------------------------
+// Address selection (track 0010): a responder that advertises a link-local A
+// record (the ZR Ultra S does, on eth0) must not drag the row onto 169.254.x.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Nearby rejects addresses that cannot carry a LAN connection", "[MdnsInterfaceFilter]")
+{
+    CHECK_FALSE(nearby_is_usable_lan_ipv4("127.0.0.1"));
+    CHECK_FALSE(nearby_is_usable_lan_ipv4("169.254.65.116"));
+    CHECK_FALSE(nearby_is_usable_lan_ipv4("0.0.0.0"));
+    CHECK_FALSE(nearby_is_usable_lan_ipv4(""));
+    CHECK_FALSE(nearby_is_usable_lan_ipv4("10.0.0"));
+    CHECK_FALSE(nearby_is_usable_lan_ipv4("10.0.0.256"));
+    CHECK_FALSE(nearby_is_usable_lan_ipv4("10.0.0.245 "));
+    CHECK_FALSE(nearby_is_usable_lan_ipv4("::1"));
+
+    CHECK(nearby_is_usable_lan_ipv4("10.0.0.245"));
+    CHECK(nearby_is_usable_lan_ipv4("192.168.1.20"));
+    CHECK(nearby_is_usable_lan_ipv4("172.16.5.4"));
+}
+
+TEST_CASE("Nearby prefers a routable A record over a link-local one", "[MdnsInterfaceFilter]")
+{
+    // The real ZR Ultra S case: two A records, parse_rr keeps the last (link-local).
+    CHECK(nearby_choose_address("169.254.65.116", "10.0.0.186") == "10.0.0.186");
+    // A routable A record wins even when the packet came from elsewhere.
+    CHECK(nearby_choose_address("10.0.0.186", "10.0.0.245") == "10.0.0.186");
+    // Nothing routable anywhere: keep what the advertisement said.
+    CHECK(nearby_choose_address("169.254.65.116", "169.254.1.1") == "169.254.65.116");
+    // No A record at all: use the responder address.
+    CHECK(nearby_choose_address("", "10.0.0.186") == "10.0.0.186");
+    CHECK(nearby_choose_address("", "") == "");
+}

@@ -53,6 +53,20 @@ struct NearbyRow
 /// Empty only when the reply carries nothing to key on.
 std::string nearby_identity(const NearbyReply &reply, const std::string &unique_key);
 
+/// True for a dotted IPv4 that can carry a LAN connection: not loopback,
+/// not the unspecified address, and not link-local (169.254.0.0/16).
+/// Pure string work: malformed input returns false.
+bool nearby_is_usable_lan_ipv4(const std::string &ip);
+
+/// Choose the address shown for a reply.
+///
+/// mDNS responders often advertise several A records, and `DnsMessage::parse_rr`
+/// keeps the last one — which for the ZR Ultra S is `eth0`'s link-local address.
+/// Prefer a routable IPv4; when the only A record is link-local and the packet
+/// came from a routable IPv4, the packet source wins. Falls back to whichever
+/// value is non-empty, so a reply is never dropped for lack of a choice.
+std::string nearby_choose_address(const std::string &a_record, const std::string &packet_source);
+
 /// Map one decoded reply to a Nearby row.
 ///
 /// `cover_base_url` is the slicer's local page server root

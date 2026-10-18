@@ -162,12 +162,14 @@ public:
 	void send();
 	void async_receive();
 	void cancel() { socket.cancel(); }
+	const boost::asio::ip::address& get_iface() const { return m_iface_address; }
 protected:
 	void receive_handler(SharedSession session, const boost::system::error_code& error, size_t bytes);
 	virtual SharedSession create_session() const = 0;
 
 	Bonjour::ReplyFn								replyfn;
 	boost::asio::ip::address					    multicast_address;
+	boost::asio::ip::address						m_iface_address;
 	boost::asio::ip::udp::socket					socket;
 	boost::asio::ip::udp::endpoint					mcast_endpoint;
 	std::shared_ptr< boost::asio::io_service >	io_service;

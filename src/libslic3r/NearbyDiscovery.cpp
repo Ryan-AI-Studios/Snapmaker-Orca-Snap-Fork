@@ -124,4 +124,60 @@ NearbyRow nearby_row_from_reply(const NearbyReply &reply, const NearbyRowPolicy 
     return row;
 }
 
+namespace {
+
+/// Dotted IPv4 -> 4 octets. Returns false for anything that is not exactly
+/// four decimal octets in 0..255 (no leading-space or suffix tolerance).
+bool parse_ipv4(const std::string &ip, unsigned char out[4])
+{
+    int      part       = 0;
+    unsigned value      = 0;
+    bool     digit_seen = false;
+    for (const char c : ip) {
+        if (c == '.') {
+            if (!digit_seen || part >= 3 || value > 255)
+                return false;
+            out[part++] = static_cast<unsigned char>(value);
+            value       = 0;
+            digit_seen  = false;
+        } else if (c >= '0' && c <= '9') {
+            value = value * 10 + static_cast<unsigned>(c - '0');
+            if (value > 255)
+                return false;
+            digit_seen = true;
+        } else {
+            return false;
+        }
+    }
+    if (!digit_seen || part != 3 || value > 255)
+        return false;
+    out[part] = static_cast<unsigned char>(value);
+    return true;
+}
+
+} // namespace
+
+bool nearby_is_usable_lan_ipv4(const std::string &ip)
+{
+    unsigned char o[4];
+    if (!parse_ipv4(ip, o))
+        return false;
+    if (o[0] == 127)                                      // loopback
+        return false;
+    if (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0) // unspecified
+        return false;
+    if (o[0] == 169 && o[1] == 254)                       // link-local
+        return false;
+    return true;
+}
+
+std::string nearby_choose_address(const std::string &a_record, const std::string &packet_source)
+{
+    if (nearby_is_usable_lan_ipv4(a_record))
+        return a_record;
+    if (nearby_is_usable_lan_ipv4(packet_source))
+        return packet_source;
+    return a_record.empty() ? packet_source : a_record;
+}
+
 } // namespace Slic3r
