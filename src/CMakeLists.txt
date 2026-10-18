@@ -270,6 +270,13 @@ if (SLIC3R_GUI)
     # libslic3r_gui will link to opengl anyway, so lets override wx
     list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX OpenGL)
 
+    if (WIN32)
+        # FindwxWidgets' system-lib list carries wsock32 (Winsock 1.1). Its
+        # setsockopt/getsockopt renumber IPPROTO_IP options, so IP_MULTICAST_IF (9)
+        # becomes IP_DONTFRAGMENT and mDNS egress is lost (Microsoft KB 257460).
+        list(TRANSFORM wxWidgets_LIBRARIES REPLACE "^wsock32(\\.lib)?$" "ws2_32")
+    endif()
+
 #    list(REMOVE_ITEM wxWidgets_LIBRARIES oleacc)
     message(STATUS "wx libs: ${wxWidgets_LIBRARIES}")
 

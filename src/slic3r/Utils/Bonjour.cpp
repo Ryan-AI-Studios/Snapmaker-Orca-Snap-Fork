@@ -1,5 +1,7 @@
 #include "Bonjour.hpp"
 
+#include "libslic3r/NearbyDiscovery.hpp"
+
 #include <cstdint>
 #include <algorithm>
 #include <array>
@@ -600,6 +602,17 @@ optional<BonjourRequest> BonjourRequest::make_AAAA(const std::string& hostname)
 }
 
 namespace {
+#ifdef _WIN32
+std::string mif_string(SOCKET fd)
+{
+	struct in_addr a;
+	int len = sizeof(a);
+	if (::getsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<char*>(&a), &len) != 0)
+		return "read-failed";
+	const unsigned char* b = reinterpret_cast<const unsigned char*>(&a.s_addr);
+	return std::to_string(b[0]) + "." + std::to_string(b[1]) + "." + std::to_string(b[2]) + "." + std::to_string(b[3]);
+}
+#endif
 std::string strip_service_dn(const std::string& service_name, const std::string& service_dn)
 {
 	if (service_name.size() <= service_dn.size()) {
@@ -633,11 +646,23 @@ UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multica
 		// set socket to listen
 		socket.set_option(udp::socket::reuse_address(true));
 		socket.bind(listen_endpoint);
+		m_iface_address = interface_address;
 		if (interface_address.is_v4()) {
 			// listen for multicast on given interface
 			socket.set_option(boost::asio::ip::multicast::join_group(multicast_address.to_v4(), interface_address.to_v4()));
 			// send to interface
 			socket.set_option(asio::ip::multicast::outbound_interface(interface_address.to_v4()));
+#ifdef _WIN32
+			// Regression guard for a Winsock 1.1 link (wsock32.lib). That library's
+			// setsockopt/getsockopt renumber IPPROTO_IP options, so IP_MULTICAST_IF (9)
+			// silently becomes IP_DONTFRAGMENT (14): mDNS egress is lost while every call
+			// still reports success. Warn instead of failing silently again.
+			const std::string requested = interface_address.to_v4().to_string();
+			const std::string applied   = mif_string(socket.native_handle());
+			if (applied != requested)
+				BOOST_LOG_TRIVIAL(warning) << "mDNS: multicast egress interface not applied (want " << requested
+					<< ", got " << applied << "); check whether wsock32.lib is on the link line";
+#endif
 		} else {
 			// listen for multicast on given interface
 			socket.set_option(boost::asio::ip::multicast::join_group(multicast_address.to_v6(), interface_address.to_v6().scope_id()));
@@ -698,14 +723,21 @@ UdpSocket::~UdpSocket()
 void UdpSocket::send()
 {
 	try {
-		for (const auto& request : requests)
-			socket.send_to(asio::buffer(request.m_data), mcast_endpoint);
-		
+		if (requests.empty()) {
+			BOOST_LOG_TRIVIAL(debug) << "[mdns] send iface=" << m_iface_address << " target=" << mcast_endpoint << " NO REQUESTS (nothing sent)";
+		}
+		for (const auto& request : requests) {
+			boost::system::error_code send_ec;
+			std::size_t sent = socket.send_to(asio::buffer(request.m_data), mcast_endpoint, 0, send_ec);
+			BOOST_LOG_TRIVIAL(debug) << "[mdns] send iface=" << m_iface_address << " target=" << mcast_endpoint
+				<< " bytes=" << sent << " ec=" << send_ec.value() << " (" << send_ec.message() << ")";
+		}
+
 		// Should we care if this is called while already receiving? (async_receive call from receive_handler)
 		async_receive();
 	}
 	catch (std::exception& e) {
-		BOOST_LOG_TRIVIAL(error) << e.what();
+		BOOST_LOG_TRIVIAL(error) << "[mdns] send iface=" << m_iface_address << " threw: " << e.what();
 	}
 }
 
@@ -744,30 +776,45 @@ void LookupSession::handle_receive(const error_code& error, size_t bytes)
 	assert(socket);
 
 	if (error) {
-		BOOST_LOG_TRIVIAL(error) << error.message();
+		BOOST_LOG_TRIVIAL(debug) << "[mdns] recv iface=" << socket->get_iface() << " ERROR " << error.message();
 		return;
 	}
 	if (bytes == 0 || !replyfn) {
+		BOOST_LOG_TRIVIAL(debug) << "[mdns] recv iface=" << socket->get_iface() << " bytes=" << bytes << " skipped (empty or no replyfn)";
 		return;
 	}
+	BOOST_LOG_TRIVIAL(debug) << "[mdns] recv iface=" << socket->get_iface() << " src=" << remote_endpoint.address() << ":" << remote_endpoint.port() << " bytes=" << bytes;
 
 	buffer.resize(bytes);
 	auto dns_msg = DnsMessage::decode(buffer, socket->get_txt_keys());
 	if (dns_msg) {
 		asio::ip::address ip = remote_endpoint.address();
-		if (dns_msg->rr_a) { ip = dns_msg->rr_a->ip; }
+		if (dns_msg->rr_a) {
+			// A responder may advertise several A records (the ZR Ultra S advertises
+			// eth0's 169.254.x link-local as well as its LAN address, and parse_rr keeps
+			// the last one). Prefer a routable address, falling back to the packet source.
+			if (ip.is_v4()) {
+				const std::string chosen = Slic3r::nearby_choose_address(dns_msg->rr_a->ip.to_string(), ip.to_string());
+				ip = asio::ip::make_address(chosen);
+			} else {
+				ip = dns_msg->rr_a->ip;
+			}
+		}
 		else if (dns_msg->rr_aaaa) { ip = dns_msg->rr_aaaa->ip; }
 
 		for (auto& sdpair : dns_msg->sdmap) {
 			if (!sdpair.second.srv) {
+				BOOST_LOG_TRIVIAL(debug) << "[mdns] recv skip: no SRV for " << sdpair.first;
 				continue;
 			}
 
 			const auto& srv = *sdpair.second.srv;
 
 			auto service_name = strip_service_dn(sdpair.first, socket->get_service_dn());
-			if (service_name.empty())
+			if (service_name.empty()) {
+				BOOST_LOG_TRIVIAL(debug) << "[mdns] recv skip: service '" << sdpair.first << "' does not end with '" << socket->get_service_dn() << "'";
 				continue;
+			}
 
 			std::string path;
 			std::string version;
