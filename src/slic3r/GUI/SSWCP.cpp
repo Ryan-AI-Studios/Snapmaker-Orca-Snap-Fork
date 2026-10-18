@@ -1949,9 +1949,9 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                 // and no model label, so its rows supply both.
                 const std::vector<MdnsEngine> mdns_engines = {
                     {"snapmaker", {"sn", "version", "machine_type", "link_mode", "userid", "device_name", "ip", "region"},
-                     {"sn", false, ""}},
+                     {"sn", false, "", false}},
                     {"moonraker", {"uuid", "version", "https_port", "route_prefix"},
-                     {"uuid", true, "WonderMaker ZR Ultra S"}},
+                     {"uuid", true, "WonderMaker ZR Ultra S", true}},
                 };
 
                 m_engines.clear();
@@ -2026,6 +2026,9 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                                                  // either way it is the value the row files under and echoes as `sn`.
                                                  Slic3r::nearby_remember_moonraker(
                                                      row.list_key, {decoded.address, decoded.port, row.data.value("name", std::string())});
+                                                 BOOST_LOG_TRIVIAL(debug)
+                                                     << "[NearbyConnect] remembered Moonraker row " << row.list_key
+                                                     << " at " << decoded.address << ":" << decoded.port;
                                              }
 
                                              if (row.derived_identity) {
@@ -6701,6 +6704,17 @@ std::string make_connect_session_id()
 // timeout. PrintHost::test() has no total HTTP deadline, so this bounds the
 // user-visible wait for a server that accepts TCP and never answers.
 constexpr int k_nearby_bind_test_timeout_seconds = 30;
+
+// A JSON string parameter, described for logging without ever throwing.
+std::string log_param(const json &params, const char *key)
+{
+    if (!params.is_object())
+        return "<not-an-object>";
+    const auto it = params.find(key);
+    if (it == params.end())
+        return "<absent>";
+    return it->is_string() ? it->get<std::string>() : std::string("<not-a-string>");
+}
 } // namespace
 
 std::unordered_map<wxWebView*, std::pair<std::string, std::shared_ptr<MqttClient>>> SSWCP_MqttAgent_Instance::m_mqtt_engine_map;
@@ -6829,20 +6843,27 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         // so a matched request never dials port 1884 and never reaches
         // sw_mqtt_connect.
         //
-        // Scoped to the Add-Device dialog, and to the request actually coming
-        // from that dialog's own webview: that is the only surface that lists
-        // Nearby rows. The same request shape also reaches this function from
-        // the printer page (My Devices card clicks), whose caller would not
-        // understand a silently closed dialog. Every request outside that
-        // dialog - and every unmatched request inside it - falls through
-        // unchanged.
-        if (auto *device_dialog = dynamic_cast<WebDeviceDialog *>(wxGetApp().get_web_device_dialog());
-            device_dialog != nullptr && device_dialog->IsShown() && device_dialog->browser() == m_webview) {
-            if (auto target = Slic3r::nearby_moonraker_target_for(m_param_data)) {
-                bind_nearby_moonraker(*target);   // no MqttClient, no dial to 1884
-                return;
-            }
+        // The scope is the session registry, not the calling page. Verified from
+        // a live log (2026-10-18 07:07-07:08): the Add-Device / Nearby UI is a
+        // Flutter route *inside* the printer view - the page never sends
+        // `sw_AddDevice`, `WebDeviceDialog` is never created, and the request
+        // arrives from the printer webview. An earlier version of this guard
+        // required that dialog and therefore rejected every real Connect. A
+        // request can only match if the device was discovered over
+        // `_moonraker._tcp` during this session, which only the Nearby list does.
+        if (const auto target = Slic3r::nearby_moonraker_target_for(m_param_data)) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] binding create request for " << target->ip << ":"
+                                     << target->port;
+            bind_nearby_moonraker(*target);   // no MqttClient, no dial to 1884
+            return;
         }
+
+        // Not matched: record what the matcher saw, so a live click can be
+        // diagnosed without another build (the companion line is logged where a
+        // row is remembered).
+        BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] unbound create request sn=" << log_param(m_param_data, "sn")
+                                 << " link_mode=" << log_param(m_param_data, "link_mode")
+                                 << " server_address=" << log_param(m_param_data, "server_address");
 
         // Assign the funnel id for this connection attempt; all subsequent
         // mqtt-agent events (connect/subscribe/set_engine/disconnect) reuse it.
@@ -7012,23 +7033,21 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         if (!self)
             return;
 
-        // Is the Add-Device dialog this request came from still the live, shown
-        // dialog with the same webview? Closing it does *not* run the dialog's
-        // destructor (the object is kept for reuse, SSWCP.cpp:6358), so
-        // `on_webview_delete` never fires and an ordinary close would otherwise
-        // leave the request free to commit. Copyable by design: the completion
-        // below is queued and runs after this scope has gone.
-        const auto active_dialog = [origin_webview]() -> WebDeviceDialog * {
+        // Is the Add-Device dialog this request might have come from still the
+        // live, shown dialog with the same webview? In this build the Nearby UI
+        // is an in-page Flutter route and no such dialog exists, so this is only
+        // used to decide whether a dialog may be closed. Copyable by design: the
+        // completion below is queued and runs after this scope has gone.
+        const auto dialog_for_close = [origin_webview]() -> WebDeviceDialog * {
             auto *dialog = dynamic_cast<WebDeviceDialog *>(wxGetApp().get_web_device_dialog());
             return (dialog != nullptr && dialog->IsShown() && dialog->browser() == origin_webview) ? dialog
-                                                                                                    : nullptr;
+                                                                                                   : nullptr;
         };
 
-        // Already terminal (superseded before we ran) or cancelled (the page
-        // that asked is gone - destroyed, replaced, or merely closed, which only
-        // hides the dialog). Nothing is owed to the page, but the request must
-        // still be retired so the generic instance expiry cannot act on it later.
-        if (self->m_nearby_bind_terminal.load() || self->is_Instance_illegal() || active_dialog() == nullptr) {
+        // Already terminal (superseded before we ran) or the page gone with its
+        // webview: nothing is owed, but the request must still be retired so the
+        // generic instance expiry cannot act on it later.
+        if (self->m_nearby_bind_terminal.load() || self->is_Instance_illegal()) {
             if (!self->m_nearby_bind_terminal.exchange(true)) {
                 BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
                                          << " cancelled before the test";
@@ -7062,22 +7081,22 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         // pending until the WCP instance expires. The watchdog delivers the
         // terminal failure instead; the abandoned worker then has nothing left
         // to do, because the terminal slot is already taken.
-        std::thread([weak_self, target, generation, active_dialog]() {
+        std::thread([weak_self, target, generation, dialog_for_close]() {
             std::this_thread::sleep_for(std::chrono::seconds(k_nearby_bind_test_timeout_seconds));
             if (!GUI_App::m_app_alive.load())
                 return;
             if (nearby_bind_generation.load() != generation)
                 return; // already superseded and answered
-            wxGetApp().CallAfter([weak_self, target, active_dialog]() {
+            wxGetApp().CallAfter([weak_self, target, dialog_for_close]() {
                 auto self = weak_self.lock();
                 if (!self)
                     return;
                 if (self->m_nearby_bind_terminal.exchange(true))
                     return; // the test answered first
 
-                // The page may have been cancelled while the test stalled, in
-                // which case no reply is owed at all.
-                if (self->is_Instance_illegal() || active_dialog() == nullptr) {
+                // The page may have gone while the test stalled, in which case
+                // no reply is owed at all.
+                if (self->is_Instance_illegal()) {
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
                                              << " cancelled before the timeout reply";
                     self->finish_job();
@@ -7097,7 +7116,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         if (self->m_work_thread.joinable())
             self->m_work_thread.detach();
         self->m_work_thread = std::thread(
-            [weak_self, host, target, generation, origin_preset, origin_webview, active_dialog]() {
+            [weak_self, host, target, generation, origin_preset, origin_webview, dialog_for_close]() {
                 wxString   msg;
                 const bool res = host->test(msg);
                 // A worker that finishes after the application has gone must not
@@ -7106,7 +7125,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                 if (!GUI_App::m_app_alive.load())
                     return;
                 wxGetApp().CallAfter([weak_self, host, target, res, msg, generation, origin_preset,
-                                      origin_webview, active_dialog]() {
+                                      origin_webview, dialog_for_close]() {
                     auto self = weak_self.lock();
                     if (!self)
                         return;
@@ -7123,11 +7142,10 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                         return;
                     }
 
-                    // Cancelled while the test ran: the dialog was closed or
-                    // replaced, so the page is gone and no caller is waiting.
-                    // Do not bind and do not reply - but retire the request, so
-                    // the generic instance expiry cannot answer it later.
-                    if (self->is_Instance_illegal() || active_dialog() == nullptr) {
+                    // The webview went away while the test ran: the page is gone
+                    // and no caller is waiting. Do not bind and do not reply, but
+                    // retire the request so the generic expiry cannot answer it.
+                    if (self->is_Instance_illegal()) {
                         BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
                                                  << " cancelled before commit";
                         self->finish_job();
@@ -7183,13 +7201,23 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
                     wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
 
-                    // Close the Add-Device dialog this attempt came from - and
-                    // only that dialog, and only if it is still the one on
-                    // screen. A WCP success is never sent: it would make the
-                    // page call sw_mqtt_connect, whose engine we deliberately
-                    // never created.
-                    if (auto *dialog = active_dialog())
+                    // Finish the UI the way the native connect epilogues do.
+                    //
+                    // The page's own request is deliberately never answered with a
+                    // WCP success (that would make it call sw_mqtt_connect, whose
+                    // engine we never created), so the Add-Device route is left
+                    // waiting. Returning to the printer view - exactly what
+                    // SSWCP.cpp:7809-7823 does after a real connect - replaces
+                    // that route and reloads the page, which also discards the
+                    // pending request. A native WebDeviceDialog, when one exists
+                    // (this build does not create one for Nearby), is closed too.
+                    if (auto *dialog = dialog_for_close())
                         dialog->EndModal(1);
+
+                    wxString printer_url = wxString::FromUTF8(
+                        LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
+                        "/web/flutter_web/index.html?path=2");
+                    wxGetApp().mainframe->load_printer_url(wxGetApp().get_international_url(printer_url));
 
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
                                              << ")";
