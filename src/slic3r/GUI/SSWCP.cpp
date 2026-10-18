@@ -4386,10 +4386,12 @@ void SSWCP_MachineConnect_Instance::sw_test_connect() {
         if (m_param_data.count("ip")) {
             std::string protocol = "moonraker";
 
-            if (m_param_data.count("protcol")) {
+            if (m_param_data.count("protocol")) {
                 protocol = m_param_data["protocol"].get<std::string>();
+            } else if (m_param_data.count("protcol")) {
+                // Some bundles still send the historical misspelling.
+                protocol = m_param_data["protcol"].get<std::string>();
             }
-
             std::string ip       = m_param_data["ip"].get<std::string>();
             int         port     = -1;
 
@@ -4403,7 +4405,9 @@ void SSWCP_MachineConnect_Instance::sw_test_connect() {
             // todo : add cin-type
             //            
             p_config->option<ConfigOptionEnum<PrintHostType>>("host_type")->value = type;            
-            p_config->set("print_host", ip + (port == -1 ? "" : std::to_string(port)));
+            // MoonRaker splits print_host on ':' (MoonRaker.cpp:795), so the port must be
+            // joined with a separator. The old code concatenated it: "10.0.0.1867125".
+            p_config->set("print_host", port > 0 ? ip + ":" + std::to_string(port) : ip);
             std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&wxGetApp().preset_bundle->printers.get_edited_preset().config));
 
             if (!host) {                
