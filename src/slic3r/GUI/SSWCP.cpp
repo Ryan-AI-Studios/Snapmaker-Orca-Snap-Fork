@@ -13,7 +13,11 @@
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "slic3r/Utils/SnapLogClient.hpp"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <iterator>
+#include <map>
+#include <set>
 #include <exception>
 #include <cstdlib>
 #include <iomanip>
@@ -2013,6 +2017,21 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                                              const std::string cover_base_url =
                                                  LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port());
                                              const NearbyRow row = nearby_row_from_reply(decoded, policy, cover_base_url);
+
+                                             if (policy.unique_key == "uuid" && !row.list_key.empty() &&
+                                                 nearby_is_usable_lan_ipv4(decoded.address)) {
+                                                 // `_moonraker._tcp` advertises `uuid`; the mapper copies it to `sn`,
+                                                 // which is the identity the page echoes back in sw_create_mqtt_client.
+                                                 // Remember it so a Connect click can be bound without ever dialling port 1884.
+                                                 // `row.list_key` is the advertised `uuid`, or the mapper's derived
+                                                 // identity (instance name, then IP) when the service advertises none -
+                                                 // either way it is the value the row files under and echoes as `sn`.
+                                                 Slic3r::nearby_remember_moonraker(
+                                                     row.list_key, {decoded.address, decoded.port, row.data.value("name", std::string())});
+                                                 BOOST_LOG_TRIVIAL(debug)
+                                                     << "[NearbyConnect] remembered Moonraker row " << row.list_key
+                                                     << " at " << decoded.address << ":" << decoded.port;
+                                             }
 
                                              if (row.derived_identity) {
                                                  // The list key is derived, not a serial the device advertised.
@@ -6682,6 +6701,22 @@ std::string make_connect_session_id()
 {
     return boost::uuids::to_string(boost::uuids::random_generator()());
 }
+
+// How long a Nearby Connect host test may take before it is answered as a
+// timeout. PrintHost::test() has no total HTTP deadline, so this bounds the
+// user-visible wait for a server that accepts TCP and never answers.
+constexpr int k_nearby_bind_test_timeout_seconds = 30;
+
+// A JSON string parameter, described for logging without ever throwing.
+std::string log_param(const json &params, const char *key)
+{
+    if (!params.is_object())
+        return "<not-an-object>";
+    const auto it = params.find(key);
+    if (it == params.end())
+        return "<absent>";
+    return it->is_string() ? it->get<std::string>() : std::string("<not-a-string>");
+}
 } // namespace
 
 std::unordered_map<wxWebView*, std::pair<std::string, std::shared_ptr<MqttClient>>> SSWCP_MqttAgent_Instance::m_mqtt_engine_map;
@@ -6804,6 +6839,37 @@ void SSWCP_MqttAgent_Instance::mqtt_msg_cb(const std::string& topic, const std::
 void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
 {
     try {
+        // Nearby Connect (track 0011): a remembered Moonraker row is bound as an
+        // OctoPrint-compatible print host instead of entering the MQTT chain.
+        // This runs before any session id / SnapLog write / MqttClient creation,
+        // so a matched request never dials port 1884 and never reaches
+        // sw_mqtt_connect.
+        //
+        // The scope is the session registry, not the calling page. Verified from
+        // a live log (2026-10-18 07:07-07:08): the Add-Device / Nearby UI is a
+        // Flutter route *inside* the printer view - the page never sends
+        // `sw_AddDevice`, `WebDeviceDialog` is never created, and the request
+        // arrives from the printer webview. An earlier version of this guard
+        // required that dialog and therefore rejected every real Connect. A
+        // request can only match if the device was discovered over
+        // `_moonraker._tcp` during this session, which only the Nearby list does.
+        if (const auto target = Slic3r::nearby_moonraker_target_for(m_param_data)) {
+            // The matcher only returns a target when `sn` is a non-empty string,
+            // and `sn` is the identity the row was remembered under.
+            const std::string identity = m_param_data["sn"].get<std::string>();
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] binding create request for " << target->ip << ":"
+                                     << target->port;
+            bind_nearby_moonraker(*target, identity);   // no MqttClient, no dial to 1884
+            return;
+        }
+
+        // Not matched: record what the matcher saw, so a live click can be
+        // diagnosed without another build (the companion line is logged where a
+        // row is remembered).
+        BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] unbound create request sn=" << log_param(m_param_data, "sn")
+                                 << " link_mode=" << log_param(m_param_data, "link_mode")
+                                 << " server_address=" << log_param(m_param_data, "server_address");
+
         // Assign the funnel id for this connection attempt; all subsequent
         // mqtt-agent events (connect/subscribe/set_engine/disconnect) reuse it.
         set_connect_session_id(make_connect_session_id());
@@ -6930,6 +6996,270 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
     } catch (std::exception& e) {
         handle_general_fail();
     }
+}
+
+// Nearby Connect (track 0011): bind a remembered Moonraker row as the print host
+// with the owner-proven OctoPrint-compatible configuration, without creating an
+// MqttClient and without ever dialling port 1884.
+void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target,
+                                                     const std::string               &identity)
+{
+    // Each bind attempt is a generation. A superseded attempt can neither commit
+    // nor close a dialog. All of this state is touched only from the WCP message
+    // pump (the UI thread), which is where this function is called from.
+    static std::atomic<uint64_t>                    nearby_bind_generation{0};
+    static std::weak_ptr<SSWCP_MqttAgent_Instance>  nearby_bind_owner;
+    // The page retries a request it never gets an answer for, and each retry used
+    // to re-run the whole bind (preset save, device record, page reload) - 258
+    // binds in one session on 2026-10-18, which corrupted the owner's app
+    // config. So: a device already bound in this session is never bound again,
+    // and no identity is attempted more than once per window.
+    static std::mutex                                       nearby_attempt_mutex;
+    static std::set<std::string>                            nearby_bound;
+    static std::map<std::string, std::chrono::steady_clock::time_point> nearby_last_attempt;
+    constexpr auto k_nearby_retry_window = std::chrono::seconds(60);
+    {
+        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
+        if (nearby_bound.count(identity) != 0) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                     << " ignored (already bound)";
+            return;
+        }
+        const auto now  = std::chrono::steady_clock::now();
+        const auto seen = nearby_last_attempt.find(identity);
+        if (seen != nearby_last_attempt.end() && now - seen->second < k_nearby_retry_window) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                     << " ignored (attempted less than a minute ago)";
+            return;
+        }
+        nearby_last_attempt[identity] = now;
+    }
+
+    const uint64_t generation = ++nearby_bind_generation;
+
+    // Retire the attempt we are replacing. It is deliberately answered with
+    // *nothing*: an error reply here is what made the page retry, and a success
+    // reply would send it into sw_mqtt_connect with an engine we never created.
+    if (auto previous = nearby_bind_owner.lock()) {
+        if (previous.get() != this && !previous->m_nearby_bind_terminal.exchange(true))
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
+                                     << " superseded; no reply sent";
+    }
+
+    // A real connect would have replaced this webview's engine; do the same, so
+    // no stale MqttClient survives an intercepted request.
+    clean_current_engine();
+
+    // Everything the completion needs to decide whether this attempt still owns
+    // the state it would change. Captured while still on the UI thread.
+    const std::string origin_preset  = wxGetApp().preset_bundle->printers.get_edited_preset().name;
+    wxWebView        *origin_webview = m_webview;
+
+    std::shared_ptr<SSWCP_MqttAgent_Instance> self_shared =
+        std::dynamic_pointer_cast<SSWCP_MqttAgent_Instance>(shared_from_this());
+    nearby_bind_owner = self_shared;
+    std::weak_ptr<SSWCP_MqttAgent_Instance> weak_self = self_shared;
+
+    wxGetApp().CallAfter([weak_self, target, identity, generation, origin_preset, origin_webview]() {
+        auto self = weak_self.lock();
+        if (!self)
+            return;
+
+        // Is the Add-Device dialog this request might have come from still the
+        // live, shown dialog with the same webview? In this build the Nearby UI
+        // is an in-page Flutter route and no such dialog exists, so this is only
+        // used to decide whether a dialog may be closed. Copyable by design: the
+        // completion below is queued and runs after this scope has gone.
+        const auto dialog_for_close = [origin_webview]() -> WebDeviceDialog * {
+            auto *dialog = dynamic_cast<WebDeviceDialog *>(wxGetApp().get_web_device_dialog());
+            return (dialog != nullptr && dialog->IsShown() && dialog->browser() == origin_webview) ? dialog
+                                                                                                   : nullptr;
+        };
+
+        // Already terminal (superseded before we ran) or the page gone with its
+        // webview: nothing is owed, but the request must still be retired so the
+        // generic instance expiry cannot act on it later.
+        if (self->m_nearby_bind_terminal.load() || self->is_Instance_illegal()) {
+            if (!self->m_nearby_bind_terminal.exchange(true)) {
+                BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
+                                         << " cancelled before the test";
+                self->finish_job();
+            }
+            return;
+        }
+
+        // Owner-proven configuration: the host type the working preset inherits
+        // (htOctoPrint) and a host-only print_host. htMoonRaker cannot be
+        // serialised, so it is deliberately not used.
+        //
+        // The test runs against a *copy*: nothing in the live preset is touched
+        // until the host has answered, so a failed, cancelled or abandoned
+        // attempt cannot leave a tentative address behind.
+        DynamicPrintConfig test_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        test_config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value = PrintHostType::htOctoPrint;
+        test_config.set("print_host", Slic3r::nearby_moonraker_print_host(target));
+        std::shared_ptr<PrintHost> host(PrintHost::get_print_host(&test_config));
+        if (!host) {
+            if (!self->m_nearby_bind_terminal.exchange(true)) {
+                BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] no print host for " << target.ip;
+                self->handle_general_fail(-1, "failed to bind the device");
+            }
+            return;
+        }
+
+        // Bounded completion. PrintHost::test() has no total HTTP deadline (the
+        // physical-printer dialog shares that property), so a server that
+        // accepts TCP and never answers would otherwise leave this attempt
+        // pending until the WCP instance expires. The watchdog delivers the
+        // terminal failure instead; the abandoned worker then has nothing left
+        // to do, because the terminal slot is already taken.
+        std::thread([weak_self, target, generation, dialog_for_close]() {
+            std::this_thread::sleep_for(std::chrono::seconds(k_nearby_bind_test_timeout_seconds));
+            if (!GUI_App::m_app_alive.load())
+                return;
+            if (nearby_bind_generation.load() != generation)
+                return; // already superseded and answered
+            wxGetApp().CallAfter([weak_self, target, dialog_for_close]() {
+                auto self = weak_self.lock();
+                if (!self)
+                    return;
+                if (self->m_nearby_bind_terminal.exchange(true))
+                    return; // the test answered first
+
+                // The page may have gone while the test stalled, in which case
+                // no reply is owed at all.
+                if (self->is_Instance_illegal()) {
+                    BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
+                                             << " cancelled before the timeout reply";
+                    self->finish_job();
+                    return;
+                }
+
+                BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] no answer from " << target.ip << " within "
+                                         << k_nearby_bind_test_timeout_seconds << " s";
+                self->handle_general_fail(-1, "the printer did not answer in time");
+            });
+        }).detach();
+
+        // Test off the UI thread, like sw_test_connect, then answer on the UI thread.
+        // The instance is fresh for every WCP request, so this thread member is
+        // never joinable here; detaching rather than joining keeps the UI thread
+        // out of any wait.
+        if (self->m_work_thread.joinable())
+            self->m_work_thread.detach();
+        self->m_work_thread = std::thread(
+            [weak_self, host, target, identity, generation, origin_preset, origin_webview, dialog_for_close]() {
+                wxString   msg;
+                const bool res = host->test(msg);
+                // A worker that finishes after the application has gone must not
+                // dispatch into it. Same guard every other async path in this
+                // file uses (e.g. the mDNS reply callbacks).
+                if (!GUI_App::m_app_alive.load())
+                    return;
+                wxGetApp().CallAfter([weak_self, host, target, identity, res, msg, generation, origin_preset,
+                                      origin_webview, dialog_for_close]() {
+                    auto self = weak_self.lock();
+                    if (!self)
+                        return;
+
+                    // Exactly one terminal outcome per request: whoever gets
+                    // here first owns it.
+                    if (self->m_nearby_bind_terminal.exchange(true))
+                        return;
+
+                    if (generation != nearby_bind_generation.load()) {
+                        BOOST_LOG_TRIVIAL(debug)
+                            << "[NearbyConnect] attempt for " << target.ip << " superseded during the test";
+                        return;
+                    }
+
+                    // The webview went away while the test ran: the page is gone
+                    // and no caller is waiting. Do not bind and do not reply, but
+                    // retire the request so the generic expiry cannot answer it.
+                    if (self->is_Instance_illegal()) {
+                        BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
+                                                 << " cancelled before commit";
+                        self->finish_job();
+                        return;
+                    }
+
+                    if (!res) {
+                        BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] test failed for " << target.ip << ": " << msg;
+                        self->handle_general_fail(-1, msg);
+                        return;
+                    }
+
+                    // The preset this attempt was started for must still be the
+                    // one being edited, otherwise committing would rewrite an
+                    // unrelated printer.
+                    if (wxGetApp().preset_bundle->printers.get_edited_preset().name != origin_preset) {
+                        BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] preset changed during connect; not binding "
+                                                 << target.ip;
+                        self->handle_general_fail(-1, "the printer preset changed during connect");
+                        return;
+                    }
+
+                    // Commit. Only a host that answered is promoted to the
+                    // connected host, so a failed bind cannot point printing at
+                    // a dead address - unlike sw_set_engine, which publishes
+                    // before any test happens.
+                    auto &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+                    config.option<ConfigOptionEnum<PrintHostType>>("host_type")->value = PrintHostType::htOctoPrint;
+                    config.set("print_host", Slic3r::nearby_moonraker_print_host(target));
+                    wxGetApp().set_connect_host(host);
+                    wxGetApp().set_host_config(config);
+
+                    // Persist the printer preset exactly like the Physical
+                    // Printer dialog so the binding survives a restart. The name
+                    // comes from the same edited preset that was written and
+                    // guarded above.
+                    const Preset     &edited = wxGetApp().preset_bundle->printers.get_edited_preset();
+                    const std::string suffix = _CTX_utf8(L_CONTEXT("Copy", "PresetName"), "PresetName");
+                    const std::string name   = edited.is_default ? "Untitled"
+                                               : edited.is_system
+                                                   ? (boost::format("%1% - %2%") % edited.name % suffix).str()
+                                                   : edited.name;
+                    wxGetApp().get_tab(Preset::TYPE_PRINTER)->save_preset("", false, false, true, name);
+
+                    // Deliberately NOT `use_new_connect=true`: that flag routes
+                    // the print button into the Snapmaker WCP/Flutter preprint
+                    // flow (Plater.cpp:22244), which this OctoPrint-compatible
+                    // host cannot serve. The owner-proven flow prints through
+                    // PrintHostJob with the bound host.
+                    //
+                    // update_slice_print_status re-derives m_print_enable from
+                    // the plate state, so it is the only call needed here.
+                    wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
+                    wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
+
+                    // Finish the UI the way the native connect epilogues do: hand
+                    // the printer view back to the app's own loader, which loads
+                    // the bound print host (Fluidd) - exactly what
+                    // `Plater.cpp:3241-3263` does for this configuration. Loading
+                    // the Flutter printer page here instead (as an earlier cut
+                    // did) left the Device tab on the Flutter page, which shows
+                    // "can't connect" with no MQTT session: the owner saw that
+                    // as a mostly-white screen on 2026-10-18 10:45:38, right
+                    // before the app's own load of Fluidd succeeded.
+                    //
+                    // A native WebDeviceDialog, when one exists (this build does
+                    // not create one for Nearby), is closed too.
+                    if (auto *dialog = dialog_for_close())
+                        dialog->EndModal(1);
+
+                    wxGetApp().mainframe->load_printer_url();
+
+                    BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
+                                             << ") as device " << identity;
+                    {
+                        // Remember it so the page's retries cannot re-run the bind.
+                        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
+                        nearby_bound.insert(identity);
+                    }
+                    self->finish_job();
+                });
+            });
+    });
 }
 
 // mqtt connect

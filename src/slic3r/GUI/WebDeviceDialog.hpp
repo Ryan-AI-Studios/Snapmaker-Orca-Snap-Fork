@@ -19,6 +19,11 @@ public:
 
     void reload();
 
+    /// The webview this dialog drives. Lets a caller prove that a web message
+    /// came from this dialog rather than from another page (e.g. the printer
+    /// view) before acting on it.
+    wxWebView *browser() const { return m_browser; }
+
 private:
     void OnClose(wxCloseEvent& evt);
     void OnNavigationRequest(wxWebViewEvent &evt);

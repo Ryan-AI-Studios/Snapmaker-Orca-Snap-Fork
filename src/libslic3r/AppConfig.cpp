@@ -711,8 +711,15 @@ std::string AppConfig::load()
         if (j.contains("devices")) {
             m_device_list = j["devices"].get<std::vector<DeviceInfo>>();
         }
-    } catch(std::exception err) {
-        BOOST_LOG_TRIVIAL(info) << format("parse app config \"%1%\", error: %2%", AppConfig::loading_path(), err.what());
+    } catch(const std::exception& err) {
+        // Catch by reference: by value the derived type is sliced away and
+        // err.what() degrades to "Unknown exception", hiding which key or type
+        // the loader rejected.
+        // Error, and by reference: by value the derived type is sliced away and
+        // err.what() degrades to "Unknown exception", hiding which key or type
+        // the loader rejected. Error level so it survives a raised
+        // log_severity_level.
+        BOOST_LOG_TRIVIAL(error) << format("parse app config \"%1%\", error: %2%", AppConfig::loading_path(), err.what());
 
         return err.what();
     }
