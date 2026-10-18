@@ -16,6 +16,8 @@
 #include <atomic>
 #include <chrono>
 #include <iterator>
+#include <map>
+#include <set>
 #include <exception>
 #include <cstdlib>
 #include <iomanip>
@@ -1949,7 +1951,9 @@ void SSWCP_MachineFind_Instance::sw_StartMachineFind()
                 // and no model label, so its rows supply both.
                 const std::vector<MdnsEngine> mdns_engines = {
                     {"snapmaker", {"sn", "version", "machine_type", "link_mode", "userid", "device_name", "ip", "region"},
-                     {"sn", false, "", false}},
+                     {"sn", false, ""}},
+                    // Moonraker's flag names the row after the model the engine
+                    // supplies instead of the responder hostname (track 0012).
                     {"moonraker", {"uuid", "version", "https_port", "route_prefix"},
                      {"uuid", true, "WonderMaker ZR Ultra S", true}},
                 };
@@ -6852,9 +6856,12 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         // request can only match if the device was discovered over
         // `_moonraker._tcp` during this session, which only the Nearby list does.
         if (const auto target = Slic3r::nearby_moonraker_target_for(m_param_data)) {
+            // The matcher only returns a target when `sn` is a non-empty string,
+            // and `sn` is the identity the row was remembered under.
+            const std::string identity = m_param_data["sn"].get<std::string>();
             BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] binding create request for " << target->ip << ":"
                                      << target->port;
-            bind_nearby_moonraker(*target);   // no MqttClient, no dial to 1884
+            bind_nearby_moonraker(*target, identity);   // no MqttClient, no dial to 1884
             return;
         }
 
@@ -6996,22 +7003,49 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
 // Nearby Connect (track 0011): bind a remembered Moonraker row as the print host
 // with the owner-proven OctoPrint-compatible configuration, without creating an
 // MqttClient and without ever dialling port 1884.
-void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target)
+void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target,
+                                                     const std::string               &identity)
 {
     // Each bind attempt is a generation. A superseded attempt can neither commit
-    // nor close a dialog, and it is answered at once instead of leaving its page
-    // waiting. All of this state is touched only from the WCP message pump (the
-    // UI thread), which is where this function is called from.
+    // nor close a dialog. All of this state is touched only from the WCP message
+    // pump (the UI thread), which is where this function is called from.
     static std::atomic<uint64_t>                    nearby_bind_generation{0};
     static std::weak_ptr<SSWCP_MqttAgent_Instance>  nearby_bind_owner;
+    // The page retries a request it never gets an answer for, and each retry used
+    // to re-run the whole bind (preset save, device record, page reload) - 258
+    // binds in one session on 2026-10-18, which corrupted the owner's app
+    // config. So: a device already bound in this session is never bound again,
+    // and no identity is attempted more than once per window.
+    static std::mutex                                       nearby_attempt_mutex;
+    static std::set<std::string>                            nearby_bound;
+    static std::map<std::string, std::chrono::steady_clock::time_point> nearby_last_attempt;
+    constexpr auto k_nearby_retry_window = std::chrono::seconds(60);
+    {
+        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
+        if (nearby_bound.count(identity) != 0) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                     << " ignored (already bound)";
+            return;
+        }
+        const auto now  = std::chrono::steady_clock::now();
+        const auto seen = nearby_last_attempt.find(identity);
+        if (seen != nearby_last_attempt.end() && now - seen->second < k_nearby_retry_window) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                     << " ignored (attempted less than a minute ago)";
+            return;
+        }
+        nearby_last_attempt[identity] = now;
+    }
 
     const uint64_t generation = ++nearby_bind_generation;
 
-    // Answer the attempt we are replacing immediately, and take its terminal
-    // slot so its own continuation can never reply or commit afterwards.
+    // Retire the attempt we are replacing. It is deliberately answered with
+    // *nothing*: an error reply here is what made the page retry, and a success
+    // reply would send it into sw_mqtt_connect with an engine we never created.
     if (auto previous = nearby_bind_owner.lock()) {
         if (previous.get() != this && !previous->m_nearby_bind_terminal.exchange(true))
-            previous->handle_general_fail(-1, "superseded by a newer connect attempt");
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
+                                     << " superseded; no reply sent";
     }
 
     // A real connect would have replaced this webview's engine; do the same, so
@@ -7028,7 +7062,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
     nearby_bind_owner = self_shared;
     std::weak_ptr<SSWCP_MqttAgent_Instance> weak_self = self_shared;
 
-    wxGetApp().CallAfter([weak_self, target, generation, origin_preset, origin_webview]() {
+    wxGetApp().CallAfter([weak_self, target, identity, generation, origin_preset, origin_webview]() {
         auto self = weak_self.lock();
         if (!self)
             return;
@@ -7116,7 +7150,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         if (self->m_work_thread.joinable())
             self->m_work_thread.detach();
         self->m_work_thread = std::thread(
-            [weak_self, host, target, generation, origin_preset, origin_webview, dialog_for_close]() {
+            [weak_self, host, target, identity, generation, origin_preset, origin_webview, dialog_for_close]() {
                 wxString   msg;
                 const bool res = host->test(msg);
                 // A worker that finishes after the application has gone must not
@@ -7124,7 +7158,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                 // file uses (e.g. the mDNS reply callbacks).
                 if (!GUI_App::m_app_alive.load())
                     return;
-                wxGetApp().CallAfter([weak_self, host, target, res, msg, generation, origin_preset,
+                wxGetApp().CallAfter([weak_self, host, target, identity, res, msg, generation, origin_preset,
                                       origin_webview, dialog_for_close]() {
                     auto self = weak_self.lock();
                     if (!self)
@@ -7138,7 +7172,6 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     if (generation != nearby_bind_generation.load()) {
                         BOOST_LOG_TRIVIAL(debug)
                             << "[NearbyConnect] attempt for " << target.ip << " superseded during the test";
-                        self->handle_general_fail(-1, "superseded by a newer connect attempt");
                         return;
                     }
 
@@ -7201,26 +7234,30 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
                     wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
 
-                    // Finish the UI the way the native connect epilogues do.
+                    // Finish the UI the way the native connect epilogues do: hand
+                    // the printer view back to the app's own loader, which loads
+                    // the bound print host (Fluidd) - exactly what
+                    // `Plater.cpp:3241-3263` does for this configuration. Loading
+                    // the Flutter printer page here instead (as an earlier cut
+                    // did) left the Device tab on the Flutter page, which shows
+                    // "can't connect" with no MQTT session: the owner saw that
+                    // as a mostly-white screen on 2026-10-18 10:45:38, right
+                    // before the app's own load of Fluidd succeeded.
                     //
-                    // The page's own request is deliberately never answered with a
-                    // WCP success (that would make it call sw_mqtt_connect, whose
-                    // engine we never created), so the Add-Device route is left
-                    // waiting. Returning to the printer view - exactly what
-                    // SSWCP.cpp:7809-7823 does after a real connect - replaces
-                    // that route and reloads the page, which also discards the
-                    // pending request. A native WebDeviceDialog, when one exists
-                    // (this build does not create one for Nearby), is closed too.
+                    // A native WebDeviceDialog, when one exists (this build does
+                    // not create one for Nearby), is closed too.
                     if (auto *dialog = dialog_for_close())
                         dialog->EndModal(1);
 
-                    wxString printer_url = wxString::FromUTF8(
-                        LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
-                        "/web/flutter_web/index.html?path=2");
-                    wxGetApp().mainframe->load_printer_url(wxGetApp().get_international_url(printer_url));
+                    wxGetApp().mainframe->load_printer_url();
 
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
-                                             << ")";
+                                             << ") as device " << identity;
+                    {
+                        // Remember it so the page's retries cannot re-run the bind.
+                        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
+                        nearby_bound.insert(identity);
+                    }
                     self->finish_job();
                 });
             });
