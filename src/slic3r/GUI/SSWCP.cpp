@@ -16,6 +16,8 @@
 #include <atomic>
 #include <chrono>
 #include <iterator>
+#include <map>
+#include <set>
 #include <exception>
 #include <cstdlib>
 #include <iomanip>
@@ -7003,19 +7005,45 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                                                      const std::string               &identity)
 {
     // Each bind attempt is a generation. A superseded attempt can neither commit
-    // nor close a dialog, and it is answered at once instead of leaving its page
-    // waiting. All of this state is touched only from the WCP message pump (the
-    // UI thread), which is where this function is called from.
+    // nor close a dialog. All of this state is touched only from the WCP message
+    // pump (the UI thread), which is where this function is called from.
     static std::atomic<uint64_t>                    nearby_bind_generation{0};
     static std::weak_ptr<SSWCP_MqttAgent_Instance>  nearby_bind_owner;
+    // The page retries a request it never gets an answer for, and each retry used
+    // to re-run the whole bind (preset save, device record, page reload) - 258
+    // binds in one session on 2026-10-18, which corrupted the owner's app
+    // config. So: a device already bound in this session is never bound again,
+    // and no identity is attempted more than once per window.
+    static std::mutex                                       nearby_attempt_mutex;
+    static std::set<std::string>                            nearby_bound;
+    static std::map<std::string, std::chrono::steady_clock::time_point> nearby_last_attempt;
+    constexpr auto k_nearby_retry_window = std::chrono::seconds(60);
+    {
+        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
+        if (nearby_bound.count(identity) != 0) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                     << " ignored (already bound)";
+            return;
+        }
+        const auto now  = std::chrono::steady_clock::now();
+        const auto seen = nearby_last_attempt.find(identity);
+        if (seen != nearby_last_attempt.end() && now - seen->second < k_nearby_retry_window) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                     << " ignored (attempted less than a minute ago)";
+            return;
+        }
+        nearby_last_attempt[identity] = now;
+    }
 
     const uint64_t generation = ++nearby_bind_generation;
 
-    // Answer the attempt we are replacing immediately, and take its terminal
-    // slot so its own continuation can never reply or commit afterwards.
+    // Retire the attempt we are replacing. It is deliberately answered with
+    // *nothing*: an error reply here is what made the page retry, and a success
+    // reply would send it into sw_mqtt_connect with an engine we never created.
     if (auto previous = nearby_bind_owner.lock()) {
         if (previous.get() != this && !previous->m_nearby_bind_terminal.exchange(true))
-            previous->handle_general_fail(-1, "superseded by a newer connect attempt");
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
+                                     << " superseded; no reply sent";
     }
 
     // A real connect would have replaced this webview's engine; do the same, so
@@ -7142,7 +7170,6 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     if (generation != nearby_bind_generation.load()) {
                         BOOST_LOG_TRIVIAL(debug)
                             << "[NearbyConnect] attempt for " << target.ip << " superseded during the test";
-                        self->handle_general_fail(-1, "superseded by a newer connect attempt");
                         return;
                     }
 
@@ -7266,6 +7293,10 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
 
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
                                              << ") as device " << identity;
+                    {
+                        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
+                        nearby_bound.insert(identity);
+                    }
                     self->finish_job();
                 });
             });
