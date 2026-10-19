@@ -371,6 +371,55 @@ TEST_CASE("Nearby binds a remembered Moonraker row from its create-mqtt-client r
     CHECK(nearby_moonraker_port(*target) == 7125);
 }
 
+TEST_CASE("Nearby matches the create a device record provokes, whose port is 0", "[NearbyConnect]")
+{
+    const std::string uuid = "0011-connect-0001-b";
+    nearby_remember_moonraker(uuid, {"10.0.0.186", 7125, "TM-T1"});
+
+    // The page builds this from the record the bind wrote: `port` 0, the row's
+    // address, the row's sn and link_mode. The strict matcher rejects the
+    // authority (0 is not a port); the record matcher ignores the port.
+    const json followup{{"server_address", "mqtt://10.0.0.186:0"}, {"sn", uuid}, {"link_mode", "lan"}};
+    CHECK_FALSE(nearby_moonraker_target_for(followup).has_value());
+
+    const auto target = nearby_moonraker_record_target_for(followup);
+    REQUIRE(target.has_value());
+    CHECK(target->ip == "10.0.0.186");
+    CHECK(target->port == 7125); // the row's SRV port, never the request's 0
+    CHECK(target->name == "TM-T1");
+}
+
+TEST_CASE("The record follow-up matcher keeps the row's identity and LAN guards", "[NearbyConnect]")
+{
+    const std::string uuid = "0011-connect-0001-c";
+    nearby_remember_moonraker(uuid, {"10.0.0.186", 7125, "TM-T1"});
+
+    // Wrong host, unknown sn, missing/non-LAN link mode and a malformed
+    // authority (even one that ends in ":0") all stay unmatched.
+    CHECK_FALSE(nearby_moonraker_record_target_for(
+                    json{{"server_address", "mqtt://10.0.0.187:0"}, {"sn", uuid}, {"link_mode", "lan"}})
+                    .has_value());
+    CHECK_FALSE(nearby_moonraker_record_target_for(
+                    json{{"server_address", "mqtt://10.0.0.186:0"}, {"sn", "0011-connect-0001-unknown"},
+                         {"link_mode", "lan"}})
+                    .has_value());
+    CHECK_FALSE(nearby_moonraker_record_target_for(
+                    json{{"server_address", "mqtt://10.0.0.186:0"}, {"sn", uuid}})
+                    .has_value());
+    CHECK_FALSE(nearby_moonraker_record_target_for(
+                    json{{"server_address", "mqtt://10.0.0.186:0"}, {"sn", uuid}, {"link_mode", "wan"}})
+                    .has_value());
+    CHECK_FALSE(nearby_moonraker_record_target_for(
+                    json{{"server_address", "mqtt://:0"}, {"sn", uuid}, {"link_mode", "lan"}})
+                    .has_value());
+
+    // A real port is still matched - this entry point must not become a way to
+    // reach a row the strict matcher would refuse.
+    CHECK(nearby_moonraker_record_target_for(
+              json{{"server_address", "mqtt://10.0.0.186:7125"}, {"sn", uuid}, {"link_mode", "lan"}})
+              .has_value());
+}
+
 TEST_CASE("Nearby refuses a remembered row when the request names a different host", "[NearbyConnect]")
 {
     const std::string uuid = "0011-connect-0002-a";

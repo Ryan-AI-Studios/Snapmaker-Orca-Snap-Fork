@@ -9,6 +9,7 @@
 #include "slic3r/GUI/Tab.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/NearbyDiscovery.hpp"
+#include "libslic3r/NearbySyntheticEngine.hpp"
 #include "libslic3r/SSWCPProtocol.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "slic3r/Utils/SnapLogClient.hpp"
@@ -6476,208 +6477,234 @@ void SSWCP_MachineManage_Instance::sw_SwitchModel()
     }
 }
 
+namespace {
+
+// Merge a page `devices` payload into the app's device records through the
+// app's own writer (`save_device_info`), then refresh the two device surfaces.
+//
+// Must run on the UI thread: `save_device_info` mutates AppConfig and marks it
+// dirty, and `AppConfig::save()` throws off the main thread by design.
+//
+// Shared by `sw_UpdateDeviceInfo` (the page's own writer) and by the Nearby
+// bind's success path (track 0013). The bind must not hand-build a `DeviceInfo`:
+// a partial record is exactly what made an earlier config unparseable, and the
+// page's writer is what fills `preset_name`, `img`, `port` and the rest.
+//
+// Returns true when at least one record changed. The preset-dialog tail
+// (`SaveProfile`/`apply_config`/`update_mode`) stays with the page path: there
+// is no WebPresetDialog on the Nearby path and 0011 already saves the preset.
+bool apply_device_info_update(const json &devices_json)
+{
+    std::string new_preset_model;
+    std::string new_preset_nozzle;
+    bool        any_changed = false;
+
+    for (const auto& item : devices_json) {
+        if (!item.is_object())
+            continue;
+        if (!item.count("dev_id") || !item["dev_id"].is_string())
+            continue;
+
+        std::string dev_id = item["dev_id"].get<std::string>();
+
+        // Load existing or start fresh
+        DeviceInfo info;
+        bool       exist = wxGetApp().app_config->get_device_info(dev_id, info);
+        if (!exist) {
+            info.dev_id    = dev_id;
+            info.connected = false;
+            info.protocol  = 0;
+            info.port      = 0;
+        }
+
+        // Snapshot before merge for diff
+        DeviceInfo before = info;
+
+        // —— Merge: only overwrite fields that are present ——
+
+        if (item.count("ip") && item["ip"].is_string())
+            info.ip = item["ip"].get<std::string>();
+
+        if (item.count("dev_name") && item["dev_name"].is_string())
+            info.dev_name = item["dev_name"].get<std::string>();
+
+        if (item.count("model_name") && item["model_name"].is_string()) {
+            info.model_name  = item["model_name"].get<std::string>();
+            new_preset_model = info.model_name;
+
+            // Machine cover image
+            size_t vendor_pos = info.model_name.find_first_of(" ");
+            if (vendor_pos != std::string::npos) {
+                std::string vendor = info.model_name.substr(0, vendor_pos);
+                info.img = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port()) + "/profiles/" + vendor + "/" +
+                           info.model_name + "_cover.png";
+            }
+        }
+
+        if (item.count("connected") && item["connected"].is_boolean())
+            info.connected = item["connected"].get<bool>();
+
+        if (item.count("sn") && item["sn"].is_string())
+            info.sn = item["sn"].get<std::string>();
+
+        if (item.count("link_mode") && item["link_mode"].is_string())
+            info.link_mode = item["link_mode"].get<std::string>();
+
+        if (item.count("id") && item["id"].is_string())
+            info.id = item["id"].get<std::string>();
+
+        if (item.count("userid") && item["userid"].is_string())
+            info.userid = item["userid"].get<std::string>();
+
+        if (item.count("protocol") && item["protocol"].is_number())
+            info.protocol = item["protocol"].get<int>();
+
+        if (item.count("port") && item["port"].is_number())
+            info.port = item["port"].get<int>();
+
+        if (item.count("user") && item["user"].is_string())
+            info.user = item["user"].get<std::string>();
+
+        if (item.count("password") && item["password"].is_string())
+            info.password = item["password"].get<std::string>();
+
+        if (item.count("ca") && item["ca"].is_string())
+            info.ca = item["ca"].get<std::string>();
+
+        if (item.count("cert") && item["cert"].is_string())
+            info.cert = item["cert"].get<std::string>();
+
+        if (item.count("key") && item["key"].is_string())
+            info.key = item["key"].get<std::string>();
+
+        if (item.count("clientId") && item["clientId"].is_string())
+            info.clientId = item["clientId"].get<std::string>();
+
+        if (item.count("api_key") && item["api_key"].is_string())
+            info.api_key = item["api_key"].get<std::string>();
+
+        if (item.count("img") && item["img"].is_string())
+            info.img = item["img"].get<std::string>();
+
+        if (item.count("nozzle_sizes") && item["nozzle_sizes"].is_array()) {
+            info.nozzle_sizes.clear();
+            for (const auto& n : item["nozzle_sizes"]) {
+                if (n.is_string()) {
+                    std::string v = n.get<std::string>();
+                    if (v == "0.2" || v == "0.4" || v == "0.6" || v == "0.8")
+                        info.nozzle_sizes.push_back(v);
+                } else if (n.is_number()) {
+                    double d = n.get<double>();
+                    if (fabs(d - 0.2) < 1e-6)
+                        info.nozzle_sizes.push_back("0.2");
+                    else if (fabs(d - 0.4) < 1e-6)
+                        info.nozzle_sizes.push_back("0.4");
+                    else if (fabs(d - 0.6) < 1e-6)
+                        info.nozzle_sizes.push_back("0.6");
+                    else if (fabs(d - 0.8) < 1e-6)
+                        info.nozzle_sizes.push_back("0.8");
+                }
+            }
+            if (!info.nozzle_sizes.empty())
+                new_preset_nozzle = info.nozzle_sizes[0];
+        }
+
+        if (item.count("nozzle_volume_type") && item["nozzle_volume_type"].is_array()) {
+            info.nozzle_volume_type.clear();
+            for (const auto& volume_type : item["nozzle_volume_type"]) {
+                if (!volume_type.is_string())
+                    continue;
+
+                const std::string type = volume_type.get<std::string>();
+                if (type == "standard" || type == "high_flow")
+                    info.nozzle_volume_type.push_back(type);
+            }
+        }
+
+        if (item.count("preset_name") && item["preset_name"].is_string())
+            info.preset_name = item["preset_name"].get<std::string>();
+
+        // Build preset name if it wasn't explicitly set but we have model + nozzle
+        if (info.preset_name.empty() && !info.model_name.empty() && !info.nozzle_sizes.empty())
+            info.preset_name = info.model_name + " (" + info.nozzle_sizes[0] + " nozzle)";
+
+        // —— Diff: skip save if nothing changed ——
+        if (exist && before.ip == info.ip && before.dev_name == info.dev_name && before.model_name == info.model_name &&
+            before.preset_name == info.preset_name && before.connected == info.connected && before.img == info.img &&
+            before.nozzle_sizes == info.nozzle_sizes && before.nozzle_volume_type == info.nozzle_volume_type && before.sn == info.sn &&
+            before.protocol == info.protocol && before.api_key == info.api_key && before.user == info.user &&
+            before.password == info.password && before.ca == info.ca && before.cert == info.cert && before.key == info.key &&
+            before.clientId == info.clientId && before.port == info.port && before.link_mode == info.link_mode &&
+            before.userid == info.userid && before.id == info.id) {
+            continue;
+        }
+
+        wxGetApp().app_config->save_device_info(info);
+        any_changed = true;
+    }
+
+    if (!any_changed)
+        return false;
+
+    // Update ProfileJson for any newly-seen model/nozzle combination
+    if (!new_preset_model.empty() && !new_preset_nozzle.empty()) {
+        std::lock_guard<std::mutex> lock(m_ProfileJson_mutex);
+        int                         nModel = m_ProfileJson["model"].size();
+        bool                        isFind = false;
+        for (int m = 0; m < nModel; m++) {
+            if (m_ProfileJson["model"][m]["model"].get<std::string>() == new_preset_model) {
+                isFind                      = true;
+                std::string nozzle_selected = m_ProfileJson["model"][m]["nozzle_selected"].get<std::string>();
+                if (nozzle_selected.find(new_preset_nozzle) == std::string::npos) {
+                    nozzle_selected += ";" + new_preset_nozzle;
+                    m_ProfileJson["model"][m]["nozzle_selected"] = nozzle_selected;
+                }
+                break;
+            }
+        }
+
+        if (!isFind) {
+            json new_item;
+            new_item["vendor"]          = "Snapmaker";
+            new_item["model"]           = new_preset_model;
+            new_item["nozzle_selected"] = new_preset_nozzle;
+            new_item["nozzle_diameter"] = new_preset_nozzle;
+            m_ProfileJson["model"].push_back(new_item);
+        }
+    }
+
+    // Update UI
+    auto devices = wxGetApp().app_config->get_devices();
+
+    json param;
+    param["command"]       = "local_devices_arrived";
+    param["sequece_id"]    = "10001";
+    param["data"]          = devices;
+    std::string logout_cmd = param.dump();
+    wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
+    GUI::wxGetApp().run_script(strJS);
+
+    json data = devices;
+    wxGetApp().device_card_notify(data);
+
+    wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
+
+    return true;
+}
+
+} // namespace
+
 void SSWCP_MachineManage_Instance::sw_UpdateDeviceInfo()
 {
-    // Expect "devices": [ { dev_id, ... }, ... ] — batch merge update
+    // Expect "devices": [ { dev_id, ... }, ... ] - batch merge update
     if (!m_param_data.count("devices") || !m_param_data["devices"].is_array()) {
         handle_general_fail(-1, "param [devices] is required (array)");
         return;
     }
 
-    std::string new_preset_model;
-    std::string new_preset_nozzle;
-    bool        any_changed = false;
-
-    wxGetApp().CallAfter([devices_json = m_param_data["devices"], new_preset_model, new_preset_nozzle, any_changed]() mutable {
-        for (const auto& item : devices_json) {
-            if (!item.is_object())
-                continue;
-            if (!item.count("dev_id") || !item["dev_id"].is_string())
-                continue;
-
-            std::string dev_id = item["dev_id"].get<std::string>();
-
-            // Load existing or start fresh
-            DeviceInfo info;
-            bool       exist = wxGetApp().app_config->get_device_info(dev_id, info);
-            if (!exist) {
-                info.dev_id    = dev_id;
-                info.connected = false;
-                info.protocol  = 0;
-                info.port      = 0;
-            }
-
-            // Snapshot before merge for diff
-            DeviceInfo before = info;
-
-            // —— Merge: only overwrite fields that are present ——
-
-            if (item.count("ip") && item["ip"].is_string())
-                info.ip = item["ip"].get<std::string>();
-
-            if (item.count("dev_name") && item["dev_name"].is_string())
-                info.dev_name = item["dev_name"].get<std::string>();
-
-            if (item.count("model_name") && item["model_name"].is_string()) {
-                info.model_name  = item["model_name"].get<std::string>();
-                new_preset_model = info.model_name;
-
-                // Machine cover image
-                size_t vendor_pos = info.model_name.find_first_of(" ");
-                if (vendor_pos != std::string::npos) {
-                    std::string vendor = info.model_name.substr(0, vendor_pos);
-                    info.img = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port()) + "/profiles/" + vendor + "/" +
-                               info.model_name + "_cover.png";
-                }
-            }
-
-            if (item.count("connected") && item["connected"].is_boolean())
-                info.connected = item["connected"].get<bool>();
-
-            if (item.count("sn") && item["sn"].is_string())
-                info.sn = item["sn"].get<std::string>();
-
-            if (item.count("link_mode") && item["link_mode"].is_string())
-                info.link_mode = item["link_mode"].get<std::string>();
-
-            if (item.count("id") && item["id"].is_string())
-                info.id = item["id"].get<std::string>();
-
-            if (item.count("userid") && item["userid"].is_string())
-                info.userid = item["userid"].get<std::string>();
-
-            if (item.count("protocol") && item["protocol"].is_number())
-                info.protocol = item["protocol"].get<int>();
-
-            if (item.count("port") && item["port"].is_number())
-                info.port = item["port"].get<int>();
-
-            if (item.count("user") && item["user"].is_string())
-                info.user = item["user"].get<std::string>();
-
-            if (item.count("password") && item["password"].is_string())
-                info.password = item["password"].get<std::string>();
-
-            if (item.count("ca") && item["ca"].is_string())
-                info.ca = item["ca"].get<std::string>();
-
-            if (item.count("cert") && item["cert"].is_string())
-                info.cert = item["cert"].get<std::string>();
-
-            if (item.count("key") && item["key"].is_string())
-                info.key = item["key"].get<std::string>();
-
-            if (item.count("clientId") && item["clientId"].is_string())
-                info.clientId = item["clientId"].get<std::string>();
-
-            if (item.count("api_key") && item["api_key"].is_string())
-                info.api_key = item["api_key"].get<std::string>();
-
-            if (item.count("img") && item["img"].is_string())
-                info.img = item["img"].get<std::string>();
-
-            if (item.count("nozzle_sizes") && item["nozzle_sizes"].is_array()) {
-                info.nozzle_sizes.clear();
-                for (const auto& n : item["nozzle_sizes"]) {
-                    if (n.is_string()) {
-                        std::string v = n.get<std::string>();
-                        if (v == "0.2" || v == "0.4" || v == "0.6" || v == "0.8")
-                            info.nozzle_sizes.push_back(v);
-                    } else if (n.is_number()) {
-                        double d = n.get<double>();
-                        if (fabs(d - 0.2) < 1e-6)
-                            info.nozzle_sizes.push_back("0.2");
-                        else if (fabs(d - 0.4) < 1e-6)
-                            info.nozzle_sizes.push_back("0.4");
-                        else if (fabs(d - 0.6) < 1e-6)
-                            info.nozzle_sizes.push_back("0.6");
-                        else if (fabs(d - 0.8) < 1e-6)
-                            info.nozzle_sizes.push_back("0.8");
-                    }
-                }
-                if (!info.nozzle_sizes.empty())
-                    new_preset_nozzle = info.nozzle_sizes[0];
-            }
-
-            if (item.count("nozzle_volume_type") && item["nozzle_volume_type"].is_array()) {
-                info.nozzle_volume_type.clear();
-                for (const auto& volume_type : item["nozzle_volume_type"]) {
-                    if (!volume_type.is_string())
-                        continue;
-
-                    const std::string type = volume_type.get<std::string>();
-                    if (type == "standard" || type == "high_flow")
-                        info.nozzle_volume_type.push_back(type);
-                }
-            }
-
-            if (item.count("preset_name") && item["preset_name"].is_string())
-                info.preset_name = item["preset_name"].get<std::string>();
-
-            // Build preset name if it wasn't explicitly set but we have model + nozzle
-            if (info.preset_name.empty() && !info.model_name.empty() && !info.nozzle_sizes.empty())
-                info.preset_name = info.model_name + " (" + info.nozzle_sizes[0] + " nozzle)";
-
-            // —— Diff: skip save if nothing changed ——
-            if (exist && before.ip == info.ip && before.dev_name == info.dev_name && before.model_name == info.model_name &&
-                before.preset_name == info.preset_name && before.connected == info.connected && before.img == info.img &&
-                before.nozzle_sizes == info.nozzle_sizes && before.nozzle_volume_type == info.nozzle_volume_type && before.sn == info.sn &&
-                before.protocol == info.protocol && before.api_key == info.api_key && before.user == info.user &&
-                before.password == info.password && before.ca == info.ca && before.cert == info.cert && before.key == info.key &&
-                before.clientId == info.clientId && before.port == info.port && before.link_mode == info.link_mode &&
-                before.userid == info.userid && before.id == info.id) {
-                continue;
-            }
-
-            wxGetApp().app_config->save_device_info(info);
-            any_changed = true;
-        }
-
-        if (!any_changed)
+    wxGetApp().CallAfter([devices_json = m_param_data["devices"]]() mutable {
+        if (!apply_device_info_update(devices_json))
             return;
-
-        // Update ProfileJson for any newly-seen model/nozzle combination
-        if (!new_preset_model.empty() && !new_preset_nozzle.empty()) {
-            std::lock_guard<std::mutex> lock(m_ProfileJson_mutex);
-            int                         nModel = m_ProfileJson["model"].size();
-            bool                        isFind = false;
-            for (int m = 0; m < nModel; m++) {
-                if (m_ProfileJson["model"][m]["model"].get<std::string>() == new_preset_model) {
-                    isFind                      = true;
-                    std::string nozzle_selected = m_ProfileJson["model"][m]["nozzle_selected"].get<std::string>();
-                    if (nozzle_selected.find(new_preset_nozzle) == std::string::npos) {
-                        nozzle_selected += ";" + new_preset_nozzle;
-                        m_ProfileJson["model"][m]["nozzle_selected"] = nozzle_selected;
-                    }
-                    break;
-                }
-            }
-
-            if (!isFind) {
-                json new_item;
-                new_item["vendor"]          = "Snapmaker";
-                new_item["model"]           = new_preset_model;
-                new_item["nozzle_selected"] = new_preset_nozzle;
-                new_item["nozzle_diameter"] = new_preset_nozzle;
-                m_ProfileJson["model"].push_back(new_item);
-            }
-        }
-
-        // Update UI
-        auto devices = wxGetApp().app_config->get_devices();
-
-        json param;
-        param["command"]       = "local_devices_arrived";
-        param["sequece_id"]    = "10001";
-        param["data"]          = devices;
-        std::string logout_cmd = param.dump();
-        wxString    strJS      = wxString::Format("window.postMessage(%s)", logout_cmd);
-        GUI::wxGetApp().run_script(strJS);
-
-        json data = devices;
-        wxGetApp().device_card_notify(data);
-
-        wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
 
         if (SSWCP_MqttAgent_Instance::m_dialog) {
             SSWCP_MqttAgent_Instance::m_dialog->SaveProfile();
@@ -6727,6 +6754,36 @@ std::map<std::pair<std::string, wxWebView*>, std::string>   SSWCP_MqttAgent_Inst
 std::map<std::pair<std::string, wxWebView*>, std::weak_ptr<SSWCP_Instance>> SSWCP_MqttAgent_Instance::m_subscribe_instance_map;
 WebPresetDialog*                                                                    SSWCP_MqttAgent_Instance::m_dialog = nullptr;
 std::unordered_map<wxWebView*, std::string>                                          SSWCP_MqttAgent_Instance::m_connect_session_map;
+std::unordered_map<wxWebView*, Slic3r::NearbySyntheticEngine>                        SSWCP_MqttAgent_Instance::m_synthetic_engine_map;
+std::atomic<uint64_t>                                                                SSWCP_MqttAgent_Instance::m_synthetic_engine_serial{0};
+
+bool SSWCP_MqttAgent_Instance::set_current_synthetic_engine(const Slic3r::NearbySyntheticEngine &engine)
+{
+    std::lock_guard<std::mutex> lk(m_engine_map_mtx);
+    m_synthetic_engine_map[m_webview] = engine;
+    return true;
+}
+
+bool SSWCP_MqttAgent_Instance::get_current_synthetic_engine(Slic3r::NearbySyntheticEngine &engine)
+{
+    std::lock_guard<std::mutex> lk(m_engine_map_mtx);
+    auto it = m_synthetic_engine_map.find(m_webview);
+    if (it == m_synthetic_engine_map.end())
+        return false;
+    engine = it->second;
+    return true;
+}
+
+bool SSWCP_MqttAgent_Instance::is_current_synthetic_engine(const std::string &id)
+{
+    // Cheap shape check first, so the registry lock stays off the stock path
+    // (a real engine id is a decimal pointer string). Membership - not the
+    // prefix - is still the authority.
+    if (!Slic3r::nearby_is_synthetic_engine_id(id))
+        return false;
+    Slic3r::NearbySyntheticEngine engine;
+    return get_current_synthetic_engine(engine) && engine.id == id;
+}
 
 void SSWCP_MqttAgent_Instance::process()
 {
@@ -6740,6 +6797,8 @@ void SSWCP_MqttAgent_Instance::process()
         sw_mqtt_subscribe();
     } else if (m_cmd == "sw_mqtt_unsubscribe") {
         sw_mqtt_unsubscribe();
+    } else if (m_cmd == "sw_mqtt_unpublish") {
+        sw_mqtt_unpublish();
     } else if (m_cmd == "sw_mqtt_publish") {
         sw_mqtt_publish();
     } else if (m_cmd == "sw_mqtt_set_engine") {
@@ -6796,6 +6855,7 @@ void SSWCP_MqttAgent_Instance::clean_current_engine()
 
     m_engine_map_mtx.lock();
     m_mqtt_engine_map.erase(m_webview);
+    m_synthetic_engine_map.erase(m_webview);
     m_engine_map_mtx.unlock();
 }
 
@@ -6855,13 +6915,53 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         // required that dialog and therefore rejected every real Connect. A
         // request can only match if the device was discovered over
         // `_moonraker._tcp` during this session, which only the Nearby list does.
-        if (const auto target = Slic3r::nearby_moonraker_target_for(m_param_data)) {
+        // Two requests reach this intercept: the Nearby page's own create for a
+        // remembered row, and the create the page emits for the device *record*
+        // the bind just wrote. The record's `port` is 0, so the strict matcher
+        // rejects that authority - the second matcher ignores the port. Both
+        // name the same row and both get the same synthetic engine.
+        auto nearby_target   = Slic3r::nearby_moonraker_target_for(m_param_data);
+        bool record_followup = false;
+        if (!nearby_target) {
+            nearby_target   = Slic3r::nearby_moonraker_record_target_for(m_param_data);
+            record_followup = nearby_target.has_value();
+        }
+        if (nearby_target) {
+            const Slic3r::NearbyMoonrakerTarget &target = *nearby_target;
             // The matcher only returns a target when `sn` is a non-empty string,
             // and `sn` is the identity the row was remembered under.
             const std::string identity = m_param_data["sn"].get<std::string>();
-            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] binding create request for " << target->ip << ":"
-                                     << target->port;
-            bind_nearby_moonraker(*target, identity);   // no MqttClient, no dial to 1884
+
+            // Track 0013: hand the page a synthetic engine id instead of a real
+            // MqttClient, so create -> connect can complete without dialling
+            // 1884. The bind answers *this* request at its terminal outcome
+            // through `answer_nearby_bind`, which is what ends the ~60 s retry
+            // spin 0011 had to live with - an unanswered create is what the page
+            // retries.
+            //
+            // A repeat create for the same row (the page re-announcing the
+            // device) must reuse the id already handed out: the first request's
+            // reply may still be pending, and the page echoes that id back.
+            Slic3r::NearbySyntheticEngine existing;
+            std::string                 synthetic_id;
+            if (get_current_synthetic_engine(existing) && existing.identity == identity)
+                synthetic_id = existing.id;
+            else
+                synthetic_id = Slic3r::nearby_synthetic_engine_id(++m_synthetic_engine_serial);
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] " << (record_followup ? "record follow-up" : "create")
+                                     << " request for " << target.ip << ":" << target.port << " (sn " << identity
+                                     << ") -> synthetic engine " << synthetic_id;
+
+            // A real connect would have replaced this webview's engine, and every
+            // early return of the bind below skips its own clean-up - so do it on
+            // all create paths, not just the ones that reach the bind's first
+            // line. It also drops the previous synthetic entry, which is why the
+            // id above was captured first; the entry is re-registered after.
+            clean_current_engine();
+
+            // The bind's terminal callback runs later, on the UI thread.
+            bind_nearby_moonraker(target, identity, synthetic_id);
+            set_current_synthetic_engine({synthetic_id, identity, target.ip});
             return;
         }
 
@@ -7000,41 +7100,135 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
     }
 }
 
-// Nearby Connect (track 0011): bind a remembered Moonraker row as the print host
-// with the owner-proven OctoPrint-compatible configuration, without creating an
-// MqttClient and without ever dialling port 1884.
+namespace {
+// Bind bookkeeping shared by the bind itself and by a later setEngine. A device
+// already bound in this session is never bound again, and no identity is
+// attempted more than once per window: the page retries a request it never
+// hears back from, and each retry used to re-run the whole bind (preset save,
+// device record, page reload) - 258 binds in one session on 2026-10-18, which
+// corrupted the owner's app config.
+std::mutex                                                  g_nearby_attempt_mutex;
+std::set<std::string>                                       g_nearby_bound;
+std::map<std::string, std::chrono::steady_clock::time_point> g_nearby_last_attempt;
+constexpr auto                                              k_nearby_retry_window = std::chrono::seconds(60);
+// Identities with a bind still running, and the creates that arrived while it
+// ran (each with the synthetic id it must be answered with). A retransmitted
+// create is coalesced onto the running attempt instead of being failed: the page
+// treats the first non-200 reply as a failed Connect, while the attempt is still
+// going to commit.
+std::set<std::string> g_nearby_inflight;
+std::map<std::string, std::string> g_nearby_last_error;
+std::map<std::string, std::vector<std::pair<std::weak_ptr<SSWCP_MqttAgent_Instance>, std::string>>>
+    g_nearby_waiters;
+} // namespace
+
+void SSWCP_MqttAgent_Instance::drain_nearby_waiters(const std::string &identity, bool success,
+                                                    const wxString &msg)
+{
+    std::vector<std::pair<std::weak_ptr<SSWCP_MqttAgent_Instance>, std::string>> waiters;
+    {
+        std::lock_guard<std::mutex> lk(g_nearby_attempt_mutex);
+        g_nearby_inflight.erase(identity);
+        if (!success)
+            g_nearby_last_error[identity] = msg.ToUTF8().data();
+        auto it = g_nearby_waiters.find(identity);
+        if (it != g_nearby_waiters.end()) {
+            waiters.swap(it->second);
+            g_nearby_waiters.erase(it);
+        }
+    }
+    // Outside the lock: answering posts a reply, and nothing it calls takes
+    // g_nearby_attempt_mutex.
+    for (auto &waiter : waiters) {
+        if (auto instance = waiter.first.lock())
+            instance->answer_nearby_bind(waiter.second, success, msg);
+    }
+}
+
+void SSWCP_MqttAgent_Instance::answer_nearby_bind(const std::string &synthetic_id, bool success,
+                                                  const wxString &msg)
+{
+    if (!success) {
+        // One bounded failure, never a retry prompt: the page retries a request
+        // it never hears back from, which is what fed 0011's 258-bind storm.
+        handle_general_fail(-1, msg);
+        return;
+    }
+    m_res_data["type"] = "mqtt";
+    m_res_data["id"]   = synthetic_id;
+    m_status = 200;
+    m_msg    = "success";
+    send_to_js();
+    finish_job();
+}
+
 void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target,
-                                                     const std::string               &identity)
+                                                     const std::string               &identity,
+                                                     const std::string               &synthetic_id)
 {
     // Each bind attempt is a generation. A superseded attempt can neither commit
     // nor close a dialog. All of this state is touched only from the WCP message
     // pump (the UI thread), which is where this function is called from.
     static std::atomic<uint64_t>                    nearby_bind_generation{0};
     static std::weak_ptr<SSWCP_MqttAgent_Instance>  nearby_bind_owner;
-    // The page retries a request it never gets an answer for, and each retry used
-    // to re-run the whole bind (preset save, device record, page reload) - 258
-    // binds in one session on 2026-10-18, which corrupted the owner's app
-    // config. So: a device already bound in this session is never bound again,
-    // and no identity is attempted more than once per window.
-    static std::mutex                                       nearby_attempt_mutex;
-    static std::set<std::string>                            nearby_bound;
-    static std::map<std::string, std::chrono::steady_clock::time_point> nearby_last_attempt;
-    constexpr auto k_nearby_retry_window = std::chrono::seconds(60);
+    // The identity the current owner is binding. Needed because a replaced
+    // attempt can no longer reach its own terminal drain (its completion returns
+    // at the terminal exchange), so the replacement has to retire it.
+    static std::string nearby_bind_owner_identity;
+    // Decide under the lock, answer outside it: answering posts a reply and the
+    // drain helper deliberately answers its waiters outside the lock too.
+    bool     answer_success_now = false;
+    bool     answer_failure_now = false;
+    bool     coalesced          = false;
+    wxString failure_msg;
     {
-        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
-        if (nearby_bound.count(identity) != 0) {
-            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
-                                     << " ignored (already bound)";
-            return;
+        std::lock_guard<std::mutex> lk(g_nearby_attempt_mutex);
+        if (g_nearby_bound.count(identity) != 0) {
+            // The printer *is* bound (and was tested when it was), so the request
+            // is answered as a success: create gets the engine id it asked for.
+            answer_success_now = true;
+        } else if (g_nearby_inflight.count(identity) != 0) {
+            // The page retransmits a request it is still waiting for. Coalesce it
+            // onto the attempt already running and answer it at that attempt's
+            // terminal outcome - an error here would report Connect as failed
+            // while the in-flight attempt goes on to commit.
+            if (auto self = std::dynamic_pointer_cast<SSWCP_MqttAgent_Instance>(shared_from_this()))
+                g_nearby_waiters[identity].push_back({self, synthetic_id});
+            coalesced = true;
+        } else {
+            const auto now  = std::chrono::steady_clock::now();
+            const auto seen = g_nearby_last_attempt.find(identity);
+            if (seen != g_nearby_last_attempt.end() && now - seen->second < k_nearby_retry_window) {
+                // A retry after a *failed* attempt inside the window: answer the
+                // stored bounded error without re-testing.
+                const auto err = g_nearby_last_error.find(identity);
+                failure_msg = err != g_nearby_last_error.end()
+                                  ? wxString::FromUTF8(err->second)
+                                  : wxString("the printer did not answer in time");
+                answer_failure_now = true;
+            } else {
+                g_nearby_last_attempt[identity] = now;
+                g_nearby_inflight.insert(identity);
+                g_nearby_last_error.erase(identity);
+            }
         }
-        const auto now  = std::chrono::steady_clock::now();
-        const auto seen = nearby_last_attempt.find(identity);
-        if (seen != nearby_last_attempt.end() && now - seen->second < k_nearby_retry_window) {
-            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
-                                     << " ignored (attempted less than a minute ago)";
-            return;
-        }
-        nearby_last_attempt[identity] = now;
+    }
+    if (answer_success_now) {
+        BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                 << " ignored (already bound)";
+        answer_nearby_bind(synthetic_id, true, "");
+        return;
+    }
+    if (coalesced) {
+        BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                 << " queued behind the in-flight attempt";
+        return;
+    }
+    if (answer_failure_now) {
+        BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] repeat request for " << identity
+                                 << " ignored (attempted less than a minute ago)";
+        answer_nearby_bind(synthetic_id, false, failure_msg);
+        return;
     }
 
     const uint64_t generation = ++nearby_bind_generation;
@@ -7043,14 +7237,20 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
     // *nothing*: an error reply here is what made the page retry, and a success
     // reply would send it into sw_mqtt_connect with an engine we never created.
     if (auto previous = nearby_bind_owner.lock()) {
-        if (previous.get() != this && !previous->m_nearby_bind_terminal.exchange(true))
+        if (previous.get() != this && !previous->m_nearby_bind_terminal.exchange(true)) {
             BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
                                      << " superseded; no reply sent";
+            // The replaced attempt's completion now returns at the terminal
+            // exchange, so it can never drain its own identity. Do it here: a
+            // stale "in flight" entry would queue every later create for that
+            // printer behind an attempt that has already ended.
+            if (!nearby_bind_owner_identity.empty() && nearby_bind_owner_identity != identity)
+                drain_nearby_waiters(nearby_bind_owner_identity, false, "the connect was superseded");
+        }
     }
 
-    // A real connect would have replaced this webview's engine; do the same, so
-    // no stale MqttClient survives an intercepted request.
-    clean_current_engine();
+    // The caller (the create handler) has already cleared this webview's engine
+    // on every one of its paths, including the early returns above.
 
     // Everything the completion needs to decide whether this attempt still owns
     // the state it would change. Captured while still on the UI thread.
@@ -7060,9 +7260,10 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
     std::shared_ptr<SSWCP_MqttAgent_Instance> self_shared =
         std::dynamic_pointer_cast<SSWCP_MqttAgent_Instance>(shared_from_this());
     nearby_bind_owner = self_shared;
+    nearby_bind_owner_identity = identity;
     std::weak_ptr<SSWCP_MqttAgent_Instance> weak_self = self_shared;
 
-    wxGetApp().CallAfter([weak_self, target, identity, generation, origin_preset, origin_webview]() {
+    wxGetApp().CallAfter([weak_self, target, identity, generation, origin_preset, origin_webview, synthetic_id]() {
         auto self = weak_self.lock();
         if (!self)
             return;
@@ -7086,6 +7287,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                 BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
                                          << " cancelled before the test";
                 self->finish_job();
+                drain_nearby_waiters(identity, false, "the connect was cancelled");
             }
             return;
         }
@@ -7104,7 +7306,8 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         if (!host) {
             if (!self->m_nearby_bind_terminal.exchange(true)) {
                 BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] no print host for " << target.ip;
-                self->handle_general_fail(-1, "failed to bind the device");
+                self->answer_nearby_bind(synthetic_id, false, "failed to bind the device");
+                drain_nearby_waiters(identity, false, "failed to bind the device");
             }
             return;
         }
@@ -7115,13 +7318,13 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         // pending until the WCP instance expires. The watchdog delivers the
         // terminal failure instead; the abandoned worker then has nothing left
         // to do, because the terminal slot is already taken.
-        std::thread([weak_self, target, generation, dialog_for_close]() {
+        std::thread([weak_self, target, identity, generation, dialog_for_close, synthetic_id]() {
             std::this_thread::sleep_for(std::chrono::seconds(k_nearby_bind_test_timeout_seconds));
             if (!GUI_App::m_app_alive.load())
                 return;
             if (nearby_bind_generation.load() != generation)
                 return; // already superseded and answered
-            wxGetApp().CallAfter([weak_self, target, dialog_for_close]() {
+            wxGetApp().CallAfter([weak_self, target, identity, dialog_for_close, synthetic_id]() {
                 auto self = weak_self.lock();
                 if (!self)
                     return;
@@ -7129,17 +7332,21 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     return; // the test answered first
 
                 // The page may have gone while the test stalled, in which case
-                // no reply is owed at all.
+                // no reply is owed at all - but the identity must still be
+                // retired, or every later create for this printer would queue
+                // behind an attempt that has already ended.
                 if (self->is_Instance_illegal()) {
                     BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
                                              << " cancelled before the timeout reply";
                     self->finish_job();
+                    drain_nearby_waiters(identity, false, "the connect was cancelled");
                     return;
                 }
 
                 BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] no answer from " << target.ip << " within "
                                          << k_nearby_bind_test_timeout_seconds << " s";
-                self->handle_general_fail(-1, "the printer did not answer in time");
+                self->answer_nearby_bind(synthetic_id, false, "the printer did not answer in time");
+                drain_nearby_waiters(identity, false, "the printer did not answer in time");
             });
         }).detach();
 
@@ -7150,7 +7357,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
         if (self->m_work_thread.joinable())
             self->m_work_thread.detach();
         self->m_work_thread = std::thread(
-            [weak_self, host, target, identity, generation, origin_preset, origin_webview, dialog_for_close]() {
+            [weak_self, host, target, identity, generation, origin_preset, origin_webview, dialog_for_close, synthetic_id]() {
                 wxString   msg;
                 const bool res = host->test(msg);
                 // A worker that finishes after the application has gone must not
@@ -7159,7 +7366,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                 if (!GUI_App::m_app_alive.load())
                     return;
                 wxGetApp().CallAfter([weak_self, host, target, identity, res, msg, generation, origin_preset,
-                                      origin_webview, dialog_for_close]() {
+                                      origin_webview, dialog_for_close, synthetic_id]() {
                     auto self = weak_self.lock();
                     if (!self)
                         return;
@@ -7172,6 +7379,7 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     if (generation != nearby_bind_generation.load()) {
                         BOOST_LOG_TRIVIAL(debug)
                             << "[NearbyConnect] attempt for " << target.ip << " superseded during the test";
+                        drain_nearby_waiters(identity, false, "the connect was superseded");
                         return;
                     }
 
@@ -7182,12 +7390,14 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                         BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] attempt for " << target.ip
                                                  << " cancelled before commit";
                         self->finish_job();
+                        drain_nearby_waiters(identity, false, "the connect was cancelled");
                         return;
                     }
 
                     if (!res) {
                         BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] test failed for " << target.ip << ": " << msg;
-                        self->handle_general_fail(-1, msg);
+                        self->answer_nearby_bind(synthetic_id, false, msg);
+                        drain_nearby_waiters(identity, false, msg);
                         return;
                     }
 
@@ -7197,7 +7407,9 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     if (wxGetApp().preset_bundle->printers.get_edited_preset().name != origin_preset) {
                         BOOST_LOG_TRIVIAL(error) << "[NearbyConnect] preset changed during connect; not binding "
                                                  << target.ip;
-                        self->handle_general_fail(-1, "the printer preset changed during connect");
+                        self->answer_nearby_bind(synthetic_id, false,
+                                                 "the printer preset changed during connect");
+                        drain_nearby_waiters(identity, false, "the printer preset changed during connect");
                         return;
                     }
 
@@ -7234,6 +7446,43 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
                     wxGetApp().mainframe->plater()->sidebar().update_all_preset_comboboxes(false);
 
+                    // Publish the connected device *before* the view is handed
+                    // over, so the device surfaces already contain it when the
+                    // page reloads. Built as the page's own `devices` payload and
+                    // merged by the same writer `sw_UpdateDeviceInfo` uses: a
+                    // hand-built DeviceInfo is what made an earlier config
+                    // unparseable, and the writer is what fills `preset_name`,
+                    // `img` and `port`. `id` is sent empty so a stale session
+                    // handle can never survive the merge.
+                    {
+                        const Preset &bound  = wxGetApp().preset_bundle->printers.get_edited_preset();
+                        double        nozzle = 0.4;
+                        if (auto *nozzles = bound.config.option<ConfigOptionFloats>("nozzle_diameter");
+                            nozzles != nullptr && !nozzles->values.empty())
+                            nozzle = nozzles->values.front();
+                        else
+                            BOOST_LOG_TRIVIAL(warning)
+                                << "[NearbyConnect] preset has no nozzle_diameter; the device record falls back to 0.4";
+                        const json device = Slic3r::nearby_synthetic_device_entry(
+                            identity, target.ip, target.name, nozzle, int(PrintHostType::htOctoPrint));
+                        apply_device_info_update(json::array({device}));
+                    }
+
+                    // The printer has answered, the preset is committed and the
+                    // device record is written: only now may this be reported as
+                    // a success. Answer *before* the view hand-off below, because
+                    // a navigation can destroy the page's JS context and the reply
+                    // would be dropped with it.
+                    BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
+                                             << ") as device " << identity;
+                    {
+                        // Remember it so the page's retries cannot re-run the bind.
+                        std::lock_guard<std::mutex> lk(g_nearby_attempt_mutex);
+                        g_nearby_bound.insert(identity);
+                    }
+                    self->answer_nearby_bind(synthetic_id, true, "");
+                    drain_nearby_waiters(identity, true, "");
+
                     // Finish the UI the way the native connect epilogues do: hand
                     // the printer view back to the app's own loader, which loads
                     // the bound print host (Fluidd) - exactly what
@@ -7250,15 +7499,6 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
                         dialog->EndModal(1);
 
                     wxGetApp().mainframe->load_printer_url();
-
-                    BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] bound " << target.ip << " (port " << target.port
-                                             << ") as device " << identity;
-                    {
-                        // Remember it so the page's retries cannot re-run the bind.
-                        std::lock_guard<std::mutex> lk(nearby_attempt_mutex);
-                        nearby_bound.insert(identity);
-                    }
-                    self->finish_job();
                 });
             });
     });
@@ -7268,9 +7508,6 @@ void SSWCP_MqttAgent_Instance::bind_nearby_moonraker(const Slic3r::NearbyMoonrak
 void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
 {
     try {
-        SNAP_LOG_BATCH(Info, "mqtt connect attempt",
-            {"eventName", "mqtt_connect_attempt"}, {"source", "cpp"},
-            {"connectSessionId", get_connect_session_id()});
         if (!m_param_data.count("id") || !m_param_data["id"].is_string()) {
             handle_general_fail(-1, "param [id] is required or wrong type");
 
@@ -7279,6 +7516,23 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
         }
 
         std::string id = m_param_data["id"].get<std::string>();
+
+        // Track 0013: a synthetic engine has no MqttClient to connect. Answer on
+        // the spot - the page only needs the acknowledgement to proceed, and the
+        // printer itself is bound (and tested) by the create request. Nothing is
+        // connected, so no connection telemetry is emitted either.
+        if (is_current_synthetic_engine(id)) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] synthetic connect " << id;
+            m_status = 200;
+            m_msg    = "success";
+            send_to_js();
+            finish_job();
+            return;
+        }
+
+        SNAP_LOG_BATCH(Info, "mqtt connect attempt",
+            {"eventName", "mqtt_connect_attempt"}, {"source", "cpp"},
+            {"connectSessionId", get_connect_session_id()});
 
         if (!validate_id(id)) {
             handle_general_fail(-1, "id is illegal");
@@ -7348,6 +7602,19 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_disconnect()
 
         std::string id = m_param_data["id"].get<std::string>();
 
+        // Track 0013: drop the synthetic engine and answer success. Nothing was
+        // connected, so there is nothing to tear down.
+        if (is_current_synthetic_engine(id)) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] synthetic disconnect " << id;
+            clean_current_engine(); // also drops the synthetic entry
+            clear_connect_session_id();
+            m_status = 200;
+            m_msg    = "success";
+            send_to_js();
+            finish_job();
+            return;
+        }
+
         if (!validate_id(id)) {
             handle_general_fail(-1, "id is illegal");
             return;
@@ -7408,6 +7675,21 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_subscribe()
         }
 
         std::string id = m_param_data["id"].get<std::string>();
+
+        // Track 0013: a synthetic engine has no topics to subscribe to. Like the
+        // native handler it answers without a deferred completion - but unlike it
+        // there is no subscription to keep open, so the instance is finished:
+        // keeping it (as an "infinite" instance) would leak one per Connect, and
+        // sw_mqtt_unsubscribe is not routed here to retire it.
+        if (is_current_synthetic_engine(id)) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] synthetic subscribe " << id
+                                     << " topic=" << log_param(m_param_data, "topic");
+            m_status = 200;
+            m_msg    = "success";
+            send_to_js();
+            finish_job();
+            return;
+        }
 
         if (!validate_id(id)) {
             handle_general_fail(-1, "id is illegal");
@@ -7569,6 +7851,33 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
         }
 
         std::string engine_id = m_param_data["engine_id"].get<std::string>();
+
+        // Track 0013: a synthetic engine is not an engine, so nothing below may
+        // reach PrintHost/Moonraker_Mqtt. The printer was bound (and tested) by
+        // the create request; report success only once that bind has committed,
+        // and never claim a connection that has not been tested.
+        if (is_current_synthetic_engine(engine_id)) {
+            Slic3r::NearbySyntheticEngine engine;
+            get_current_synthetic_engine(engine);
+            bool bound = false;
+            {
+                std::lock_guard<std::mutex> lk(g_nearby_attempt_mutex);
+                bound = g_nearby_bound.count(engine.identity) != 0;
+            }
+            if (bound) {
+                BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] synthetic setEngine " << engine_id
+                                         << " after the bind committed";
+                m_status = 200;
+                m_msg    = "success";
+                send_to_js();
+                finish_job();
+            } else {
+                BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] synthetic setEngine " << engine_id
+                                         << " before the bind committed";
+                handle_general_fail(-1, "the printer is still connecting");
+            }
+            return;
+        }
 
         if (!validate_id(engine_id)) {
             handle_general_fail(-1, "id is illegal");
@@ -7968,6 +8277,31 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
     }
 }
 
+// `sw_mqtt_unpublish` is allow-listed but has no engine-side handler, so a real
+// id keeps the previous generic failure. A synthetic engine id (track 0013) is
+// acknowledged like publish: the page is talking to an engine that does not
+// exist, and a failure there only invites a retry.
+void SSWCP_MqttAgent_Instance::sw_mqtt_unpublish()
+{
+    try {
+        const std::string id = m_param_data.count("id") && m_param_data["id"].is_string()
+                                   ? m_param_data["id"].get<std::string>()
+                                   : std::string{};
+        if (is_current_synthetic_engine(id)) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] synthetic unpublish " << id
+                                     << " topic=" << log_param(m_param_data, "topic");
+            m_status = 200;
+            m_msg    = "success";
+            send_to_js();
+            finish_job();
+            return;
+        }
+        handle_general_fail();
+    } catch (std::exception &e) {
+        handle_general_fail();
+    }
+}
+
 void SSWCP_MqttAgent_Instance::sw_mqtt_publish()
 {
     try {
@@ -7978,6 +8312,18 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_publish()
         }
 
         std::string id = m_param_data["id"].get<std::string>();
+
+        // Track 0013: nothing is published over a synthetic engine. Acknowledge
+        // it as a success so the page does not treat the connection as broken.
+        if (is_current_synthetic_engine(id)) {
+            BOOST_LOG_TRIVIAL(debug) << "[NearbyConnect] synthetic publish " << id
+                                     << " topic=" << log_param(m_param_data, "topic");
+            m_status = 200;
+            m_msg    = "success";
+            send_to_js();
+            finish_job();
+            return;
+        }
 
         if (!validate_id(id)) {
             handle_general_fail(-1, "id is illegal");
@@ -8347,6 +8693,16 @@ void SSWCP::stop_machine_find() {
 // Handle webview deletion
 void SSWCP::on_webview_delete(wxWebView* view)
 {
+    // Drop the per-webview engine bookkeeping while the key is still the view.
+    // The instances' own set_Instance_illegal() runs after set_web_view(nullptr),
+    // so clean_current_engine() there would erase the nullptr key, not this one.
+    if (view != nullptr) {
+        std::lock_guard<std::mutex> lk(SSWCP_MqttAgent_Instance::m_engine_map_mtx);
+        SSWCP_MqttAgent_Instance::m_mqtt_engine_map.erase(view);
+        SSWCP_MqttAgent_Instance::m_synthetic_engine_map.erase(view);
+        SSWCP_MqttAgent_Instance::m_connect_session_map.erase(view);
+    }
+
     // Mark all instances associated with this webview as invalid
     std::vector<SSWCP_Instance*> instances_to_invalidate;
 

@@ -102,6 +102,16 @@ void nearby_remember_moonraker(const std::string &uuid, const NearbyMoonrakerTar
 /// type-checked: a wrong/missing type yields nullopt and never throws.
 std::optional<NearbyMoonrakerTarget> nearby_moonraker_target_for(const nlohmann::json &create_params);
 
+/// Match the client-create request the page emits for a **device record** it has
+/// just learned about (the record the Nearby bind / `sw_UpdateDeviceInfo`
+/// writes). That request carries the record's fields, and a Moonraker row's
+/// record has `port` 0 - its 7125 is an HTTP port, not an MQTT broker - so the
+/// strict matcher above rejects the authority and the page would get a real,
+/// never-connected `MqttClient`. This entry point is the same match with the
+/// port deliberately ignored (`sn` must still be a row remembered this session,
+/// the host must still be that row's address, `link_mode` must still be "lan").
+std::optional<NearbyMoonrakerTarget> nearby_moonraker_record_target_for(const nlohmann::json &create_params);
+
 /// Host-only print_host for the target (matches the owner-proven preset).
 std::string nearby_moonraker_print_host(const NearbyMoonrakerTarget &target);
 

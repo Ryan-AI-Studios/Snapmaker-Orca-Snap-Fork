@@ -35,6 +35,7 @@ add_executable(${_TEST_NAME}_tests
     test_png_io.cpp
 	test_sswcp_protocol.cpp
 	test_nearby_discovery.cpp
+    test_nearby_synthetic_engine.cpp
     test_indexed_triangle_set.cpp
 	TestMD5.cpp
     ../libnest2d/printer_parts.cpp
