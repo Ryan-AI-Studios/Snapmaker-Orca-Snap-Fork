@@ -302,7 +302,10 @@ void nearby_remember_moonraker(const std::string &uuid, const NearbyMoonrakerTar
     moonraker_registry()[uuid] = target;
 }
 
-std::optional<NearbyMoonrakerTarget> nearby_moonraker_target_for(const nlohmann::json &create_params)
+namespace {
+// Shared body of the two matchers below: everything except how strict the
+// authority's port is. Never throws; a malformed request is a nullopt.
+std::optional<NearbyMoonrakerTarget> moonraker_match(const nlohmann::json &create_params, bool allow_zero_port)
 {
     if (!create_params.is_object())
         return std::nullopt;
@@ -324,7 +327,16 @@ std::optional<NearbyMoonrakerTarget> nearby_moonraker_target_for(const nlohmann:
     if (link_it->get<std::string>() != "lan")
         return std::nullopt;
 
-    const std::string host = server_address_host(server_it->get<std::string>());
+    std::string address = server_it->get<std::string>();
+    if (allow_zero_port) {
+        // A device record's `port` is 0 (a Moonraker row's 7125 is HTTP, not an
+        // MQTT broker), and the page joins it into `mqtt://<ip>:0`. Drop that
+        // literal suffix and let the strict parser judge the rest.
+        if (address.size() > 2 && address.compare(address.size() - 2, 2, ":0") == 0)
+            address.resize(address.size() - 2);
+    }
+
+    const std::string host = server_address_host(address);
     if (host.empty())
         return std::nullopt;
 
@@ -334,6 +346,17 @@ std::optional<NearbyMoonrakerTarget> nearby_moonraker_target_for(const nlohmann:
         return std::nullopt;
 
     return it->second;
+}
+} // namespace
+
+std::optional<NearbyMoonrakerTarget> nearby_moonraker_target_for(const nlohmann::json &create_params)
+{
+    return moonraker_match(create_params, /*allow_zero_port=*/false);
+}
+
+std::optional<NearbyMoonrakerTarget> nearby_moonraker_record_target_for(const nlohmann::json &create_params)
+{
+    return moonraker_match(create_params, /*allow_zero_port=*/true);
 }
 
 std::string nearby_moonraker_print_host(const NearbyMoonrakerTarget &target)

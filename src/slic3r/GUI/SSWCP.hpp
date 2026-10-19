@@ -20,6 +20,7 @@
 #include "slic3r/Utils/MQTT.hpp"
 #include "libslic3r/SSWCPProtocol.hpp"
 #include "libslic3r/NearbyDiscovery.hpp"
+#include "libslic3r/NearbySyntheticEngine.hpp"
 #include "WebSocketDebugServer.hpp"
 
 
@@ -304,11 +305,29 @@ public:
     static std::unordered_map<wxWebView*, std::string> m_connect_session_map;
 
 public:
-    // Nearby Connect (track 0011): bind a remembered Moonraker row as the print
-    // host without entering the MQTT chain. `identity` is the row's `sn` from
-    // the request (the registry key the device is remembered under), used to
-    // key the device record that My Devices reads.
-    void bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target, const std::string &identity);
+    // Nearby Connect (tracks 0011 + 0013): bind a remembered Moonraker row as
+    // the print host without entering the MQTT chain. `identity` is the row's
+    // `sn` from the request (the registry key the device is remembered under);
+    // on success the connected device record is written for it. `synthetic_id`
+    // is the engine id the create reply carries. The request is answered at the
+    // bind's terminal outcome, never before PrintHost::test() has an outcome.
+    // The caller must have cleared this webview's engine already (the create
+    // handler does so on every path, including its early returns).
+    void bind_nearby_moonraker(const Slic3r::NearbyMoonrakerTarget &target, const std::string &identity,
+                               const std::string &synthetic_id);
+
+    // Synthetic engines (track 0013). A synthetic id is handed to the page
+    // instead of a real MqttClient; every mqtt-agent command carrying it back is
+    // answered without touching m_mqtt_engine_map, because every consumer of
+    // that map dereferences the client. Guarded by m_engine_map_mtx, like the
+    // real map, and cleared with it.
+    static std::unordered_map<wxWebView *, Slic3r::NearbySyntheticEngine> m_synthetic_engine_map;
+    static std::atomic<uint64_t>                                          m_synthetic_engine_serial;
+
+    bool set_current_synthetic_engine(const Slic3r::NearbySyntheticEngine &engine);
+    bool get_current_synthetic_engine(Slic3r::NearbySyntheticEngine &engine);
+    // True when `id` is this webview's registered synthetic engine.
+    bool is_current_synthetic_engine(const std::string &id);
 
     // True once this instance's Nearby bind attempt has produced its terminal
     // outcome (answered, committed, superseded or timed out). Guarantees exactly
@@ -362,11 +381,22 @@ private:
     void sw_mqtt_disconnect();
     void sw_mqtt_subscribe();
     void sw_mqtt_unsubscribe();
+    void sw_mqtt_unpublish();
     void sw_mqtt_publish();
     void sw_mqtt_set_engine();
 
 private:
     void clean_current_engine();
+
+    // Answer the create request that started a Nearby bind: `{type:"mqtt",
+    // id:<synthetic>}` on success, one bounded error otherwise. `success` is
+    // only ever true after PrintHost::test() has an outcome, so no reply is sent
+    // before the bind commits.
+    void answer_nearby_bind(const std::string &synthetic_id, bool success, const wxString &msg);
+
+    // Retire the bind's in-flight state and answer every create that was
+    // coalesced onto it with the same outcome.
+    static void drain_nearby_waiters(const std::string &identity, bool success, const wxString &msg);
 
     static void mqtt_msg_cb(const std::string& topic, const std::string& payload, void* client);
 

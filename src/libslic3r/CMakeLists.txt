@@ -326,6 +326,8 @@ set(lisbslic3r_sources
     MutablePriorityQueue.hpp
     NearbyDiscovery.cpp
     NearbyDiscovery.hpp
+    NearbySyntheticEngine.cpp
+    NearbySyntheticEngine.hpp
     NormalUtils.cpp
     NormalUtils.hpp
     NSVGUtils.cpp
