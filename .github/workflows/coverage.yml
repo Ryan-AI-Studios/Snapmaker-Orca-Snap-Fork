@@ -133,7 +133,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-coverage
           path: build_cov/test-results.xml
@@ -149,7 +149,7 @@ jobs:
 
       - name: Upload coverage report
         if: always() && steps.build-tests.outcome == 'success'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: build_cov/coverage/
@@ -157,7 +157,7 @@ jobs:
 
       - name: Upload coverage summary
         if: always() && steps.build-tests.outcome == 'success'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-summary
           path: build_cov/coverage-summary.txt
@@ -170,7 +170,7 @@ jobs:
 
       - name: Upload HTML report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: test-report-${{ matrix.os }}
           path: build_cov/test-report.html
