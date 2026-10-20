@@ -34,7 +34,7 @@ jobs:
 
       - name: "[Windows] Download PDB artifact"
         if: inputs.os == 'windows-2022'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.pdb-artifact-name }}
           path: ./symbols
@@ -125,7 +125,7 @@ jobs:
 
       - name: "[macOS] Download dSYM artifact"
         if: inputs.os == 'macos-15'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.dsym-artifact-name }}
           path: ./symbols
